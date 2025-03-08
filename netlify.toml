@@ -1,0 +1,79 @@
+// netlify/functions/analyze-image.js
+const axios = require("axios");
+
+exports.handler = async function(event, context) {
+  // Ensure the request is a POST
+  if (event.httpMethod !== "POST") {
+    return {
+      statusCode: 405,
+      body: JSON.stringify({ error: "Method Not Allowed" }),
+    };
+  }
+
+  try {
+    // Parse the request body
+    const body = JSON.parse(event.body);
+    const imageBase64 = body.imageBase64;
+    
+    if (!imageBase64) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ error: "No image data provided" }),
+      };
+    }
+
+    // Call OpenAI API securely using environment variable for API key
+    const response = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "Analyze this image and extract text information visible such as: names, company names, job titles, and professional credentials. Format the information as:\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nFor multiple entries, separate with a blank line. For anything thats not visible, simply write '-'",
+              },
+              {
+                type: "image_url",
+                image_url: { url: imageBase64 },
+              },
+            ],
+          },
+        ],
+        max_tokens: 1000,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        },
+      }
+    );
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        text: response.data.choices[0].message.content,
+      }),
+    };
+  } catch (error) {
+    console.error("Error calling OpenAI:", error);
+    let errorMessage = "Internal Server Error";
+    
+    if (error.response) {
+      // OpenAI API error
+      errorMessage = error.response.data.error?.message || error.response.statusText;
+      return {
+        statusCode: error.response.status,
+        body: JSON.stringify({ error: errorMessage }),
+      };
+    }
+    
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: errorMessage }),
+    };
+  }
+};

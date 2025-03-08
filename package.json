@@ -1,0 +1,9 @@
+{
+    "name": "screenshot-analyzer",
+    "version": "1.0.0",
+    "description": "Screenshot Analyzer app using OpenAI's vision model",
+    "main": "index.html",
+    "dependencies": {
+      "axios": "^1.6.2"
+    }
+  }

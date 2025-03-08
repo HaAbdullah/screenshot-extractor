@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Screenshot Analyzer</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          sans-serif;
+        background: #f8f9fa;
+        margin: 0;
+        padding: 2rem;
+        min-height: 100vh;
+      }
+
+      .container {
+        max-width: 1000px;
+        margin: 0 auto;
+        background: white;
+        padding: 2rem;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+      }
+
+      .upload-section {
+        border: 2px dashed #e0e0e0;
+        border-radius: 8px;
+        padding: 2rem;
+        text-align: center;
+        margin-bottom: 2rem;
+        transition: border-color 0.2s;
+      }
+
+      input[type="file"] {
+        display: none;
+      }
+
+      .custom-upload {
+        background: #007bff;
+        color: white;
+        padding: 0.75rem 1.5rem;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 0.2s;
+        display: inline-block;
+      }
+
+      .custom-upload:hover {
+        background: #0056b3;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 2rem;
+      }
+
+      th,
+      td {
+        padding: 12px;
+        text-align: left;
+        border-bottom: 1px solid #e0e0e0;
+      }
+
+      th {
+        background-color: #f8f9fa;
+        font-weight: 500;
+      }
+
+      .button-group {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 1rem;
+      }
+
+      .download-btn,
+      .clear-btn {
+        padding: 0.75rem 1.5rem;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 0.2s;
+        color: white;
+      }
+
+      .download-btn {
+        background: #28a745;
+      }
+
+      .download-btn:hover {
+        background: #218838;
+      }
+
+      .clear-btn {
+        background: #dc3545;
+      }
+
+      .clear-btn:hover {
+        background: #c82333;
+      }
+
+      .loading {
+        display: none;
+        margin: 1rem 0;
+        color: #6c757d;
+      }
+
+      .status-log {
+        margin-top: 1rem;
+        background-color: #f8f9fa;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        padding: 1rem;
+        font-family: monospace;
+        max-height: 200px;
+        overflow-y: auto;
+        display: none;
+      }
+
+      .status-log pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .debug-toggle {
+        margin-top: 1rem;
+        font-size: 0.85rem;
+        color: #6c757d;
+        cursor: pointer;
+      }
+
+      .debug-toggle:hover {
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Screenshot Analyzer</h1>
+
+      <div class="upload-section">
+        <input type="file" id="fileInput" accept="image/*" multiple />
+
+        <label for="fileInput" class="custom-upload"> Upload Screenshot </label>
+        <p style="margin-top: 1rem; color: #6c757d">(PNG, JPG supported)</p>
+      </div>
+
+      <div class="button-group">
+        <button class="clear-btn" id="clearBtn">Clear All</button>
+        <button class="download-btn" id="downloadBtn">Download CSV</button>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Company</th>
+            <th>Role</th>
+            <th>Credentials</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+          <!-- Rows will be added dynamically -->
+        </tbody>
+      </table>
+
+      <div class="loading" id="loading">Analyzing...</div>
+
+      <div class="debug-toggle" id="debugToggle">Show Debug Console</div>
+      <div class="status-log" id="statusLog">
+        <pre id="statusText"></pre>
+      </div>
+    </div>
+
+    <script>
+      let entries = [];
+      const DB_NAME = "screenshotAnalyzerDB";
+      const STORE_NAME = "entries";
+
+      // Debug logging function
+      function logStatus(message, isError = false) {
+        const statusText = document.getElementById("statusText");
+        const timestamp = new Date().toLocaleTimeString();
+        const logEntry = `[${timestamp}] ${
+          isError ? "❌ ERROR: " : "✓ "
+        } ${message}`;
+        statusText.innerHTML += logEntry + "\n";
+        statusText.scrollTop = statusText.scrollHeight;
+        console.log(logEntry);
+
+        // Show the log if it's an error
+        if (isError) {
+          document.getElementById("statusLog").style.display = "block";
+          document.getElementById("debugToggle").textContent =
+            "Hide Debug Console";
+        }
+      }
+
+      // Initialize IndexedDB
+      function initDB() {
+        return new Promise((resolve, reject) => {
+          if (!window.indexedDB) {
+            logStatus(
+              "Your browser doesn't support IndexedDB. Using local storage instead."
+            );
+            resolve(null);
+            return;
+          }
+
+          const request = indexedDB.open(DB_NAME, 1);
+
+          request.onerror = (event) => {
+            logStatus("IndexedDB error: " + event.target.error, true);
+            resolve(null);
+          };
+
+          request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+              db.createObjectStore(STORE_NAME, {
+                keyPath: "id",
+                autoIncrement: true,
+              });
+            }
+          };
+
+          request.onsuccess = (event) => {
+            logStatus("Database initialized successfully");
+            resolve(event.target.result);
+          };
+        });
+      }
+
+      // Save entries to storage
+      async function saveEntries(db) {
+        if (db) {
+          // Use IndexedDB
+          const transaction = db.transaction([STORE_NAME], "readwrite");
+          const store = transaction.objectStore(STORE_NAME);
+
+          // Clear existing entries
+          store.clear();
+
+          // Add all current entries
+          entries.forEach((entry) => {
+            store.add(entry);
+          });
+          logStatus(`Saved ${entries.length} entries to IndexedDB`);
+        } else {
+          // Use localStorage as fallback
+          localStorage.setItem(
+            "screenshotAnalyzerEntries",
+            JSON.stringify(entries)
+          );
+          logStatus(`Saved ${entries.length} entries to localStorage`);
+        }
+      }
+
+      // Load entries from storage
+      async function loadEntries(db) {
+        return new Promise((resolve, reject) => {
+          if (db) {
+            // Use IndexedDB
+            const transaction = db.transaction([STORE_NAME], "readonly");
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.getAll();
+
+            request.onsuccess = () => {
+              logStatus(
+                `Loaded ${
+                  request.result ? request.result.length : 0
+                } entries from IndexedDB`
+              );
+              resolve(request.result || []);
+            };
+
+            request.onerror = (event) => {
+              logStatus("Error loading entries: " + event.target.error, true);
+              resolve([]);
+            };
+          } else {
+            // Use localStorage as fallback
+            const savedEntries = localStorage.getItem(
+              "screenshotAnalyzerEntries"
+            );
+            const parsed = savedEntries ? JSON.parse(savedEntries) : [];
+            logStatus(`Loaded ${parsed.length} entries from localStorage`);
+            resolve(parsed);
+          }
+        });
+      }
+
+      // Parse the AI response for multiple people
+      function parseMultiplePersons(text) {
+        logStatus("Parsing AI response");
+        // Split by double newlines to separate different people
+        const personBlocks = text.split(/\n\s*\n/);
+        logStatus(`Found ${personBlocks.length} person blocks in response`);
+
+        const results = personBlocks
+          .map((block) => {
+            // Parse individual person data
+            const result = block.split("\n").reduce((acc, line) => {
+              if (line.includes(": ")) {
+                const [key, value] = line.split(": ").map((s) => s.trim());
+                acc[key.toLowerCase()] = value;
+              }
+              return acc;
+            }, {});
+
+            // Add timestamp for sorting
+            return {
+              name: result.name || "N/A",
+              company: result.company || "N/A",
+              role: result.role || "N/A",
+              credentials: result.credentials || "N/A",
+              timestamp: new Date().toISOString(),
+            };
+          })
+          .filter(
+            (person) => person.name !== "N/A" || person.company !== "N/A"
+          );
+
+        logStatus(
+          `Successfully parsed ${results.length} people from the response`
+        );
+        return results;
+      }
+
+      // Update the table with entries
+      function updateTable() {
+        const tableBody = document.getElementById("tableBody");
+        tableBody.innerHTML = entries
+          .map(
+            (entry) => `
+              <tr>
+                <td>${entry.name}</td>
+                <td>${entry.company}</td>
+                <td>${entry.role}</td>
+                <td>${entry.credentials}</td>
+              </tr>
+            `
+          )
+          .join("");
+        logStatus(`Updated table with ${entries.length} entries`);
+      }
+
+      // Download entries as CSV
+      function downloadCSV() {
+        const headers = ["Name", "Company", "Role", "Credentials"];
+        const csvContent = [
+          headers.join(","),
+          ...entries.map((entry) =>
+            [
+              `"${entry.name.replace(/"/g, '""')}"`,
+              `"${entry.company.replace(/"/g, '""')}"`,
+              `"${entry.role.replace(/"/g, '""')}"`,
+              `"${entry.credentials.replace(/"/g, '""')}"`,
+            ].join(",")
+          ),
+        ].join("\n");
+
+        const blob = new Blob([csvContent], {
+          type: "text/csv;charset=utf-8;",
+        });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.setAttribute("href", url);
+        link.setAttribute(
+          "download",
+          `screenshot-analysis-${new Date().toISOString().slice(0, 10)}.csv`
+        );
+        link.style.visibility = "hidden";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        logStatus("Downloaded CSV file");
+      }
+
+      // Initialize the application
+      async function init() {
+        logStatus("Initializing application");
+        const db = await initDB();
+        entries = await loadEntries(db);
+        updateTable();
+
+        document
+          .getElementById("downloadBtn")
+          .addEventListener("click", downloadCSV);
+
+        document
+          .getElementById("clearBtn")
+          .addEventListener("click", async () => {
+            entries = [];
+            updateTable();
+            await saveEntries(db);
+            logStatus("Cleared all entries");
+          });
+
+        // Toggle debug console
+        document.getElementById("debugToggle").addEventListener("click", () => {
+          const statusLog = document.getElementById("statusLog");
+          const debugToggle = document.getElementById("debugToggle");
+          if (statusLog.style.display === "none" || !statusLog.style.display) {
+            statusLog.style.display = "block";
+            debugToggle.textContent = "Hide Debug Console";
+          } else {
+            statusLog.style.display = "none";
+            debugToggle.textContent = "Show Debug Console";
+          }
+        });
+
+        document
+          .getElementById("fileInput")
+          .addEventListener("change", async (e) => {
+            const files = e.target.files;
+            if (!files.length) {
+              logStatus("No files selected", true);
+              return;
+            }
+
+            const loading = document.getElementById("loading");
+            loading.style.display = "block";
+
+            logStatus(`Processing ${files.length} files`);
+
+            try {
+              for (const file of files) {
+                logStatus(`Processing file: ${file.name}`);
+                // Convert image to base64
+                const base64 = await new Promise((resolve, reject) => {
+                  const reader = new FileReader();
+                  reader.readAsDataURL(file);
+                  reader.onload = () => resolve(reader.result);
+                  reader.onerror = (error) => reject(error);
+                });
+
+                logStatus("Image converted to base64");
+                logStatus("Sending request to the serverless function");
+
+                try {
+                  // Call your Netlify Function instead of directly calling OpenAI
+                  const response = await fetch(
+                    "/.netlify/functions/analyze-image",
+                    {
+                      method: "POST",
+                      headers: {
+                        "Content-Type": "application/json",
+                      },
+                      body: JSON.stringify({
+                        imageBase64: base64,
+                      }),
+                    }
+                  );
+
+                  logStatus(`API response status: ${response.status}`);
+
+                  if (!response.ok) {
+                    const errorText = await response.text();
+                    logStatus(`API Error Response: ${errorText}`, true);
+                    throw new Error(
+                      `Server Error: ${response.status} ${response.statusText}`
+                    );
+                  }
+
+                  const data = await response.json();
+                  logStatus("Successfully received API response");
+
+                  if (data.error) {
+                    throw new Error(`API Error: ${data.error}`);
+                  }
+
+                  const analysis = data.text;
+                  logStatus(
+                    `Received analysis text: ${analysis.substring(0, 50)}...`
+                  );
+
+                  // Parse multiple people from the response
+                  const newEntries = parseMultiplePersons(analysis);
+                  logStatus(
+                    `Extracted ${newEntries.length} people from the analysis`
+                  );
+
+                  // Add to existing entries
+                  entries = [...entries, ...newEntries];
+                } catch (apiError) {
+                  logStatus(
+                    `Error processing file ${file.name}: ${apiError.message}`,
+                    true
+                  );
+                  alert(
+                    `Error processing file ${file.name}: ${apiError.message}`
+                  );
+                }
+              }
+
+              // Update table and save to storage
+              updateTable();
+              await saveEntries(db);
+              logStatus("All files processed successfully");
+            } catch (error) {
+              logStatus(`Error: ${error.message}`, true);
+              console.error(error);
+              alert(`Error: ${error.message}`);
+            } finally {
+              loading.style.display = "none";
+            }
+          });
+
+        logStatus("Application initialized successfully");
+      }
+
+      // Start the app when page loads
+      window.addEventListener("DOMContentLoaded", init);
+    </script>
+  </body>
+</html>
