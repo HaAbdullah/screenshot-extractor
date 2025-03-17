@@ -134,6 +134,50 @@
       .debug-toggle:hover {
         text-decoration: underline;
       }
+      .model-selection {
+        margin-bottom: 1.5rem;
+        padding: 1rem;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        background-color: #fafafa;
+      }
+
+      .model-selection h3 {
+        margin-top: 0;
+        margin-bottom: 1rem;
+        font-size: 1.1rem;
+        color: #333;
+      }
+
+      .model-options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+      }
+
+      .model-options label {
+        display: flex;
+        align-items: center;
+        padding: 0.5rem 1rem;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        background-color: white;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+
+      .model-options label:hover {
+        background-color: #f0f0f0;
+      }
+
+      .model-options input[type="radio"] {
+        margin-right: 0.5rem;
+      }
+
+      .model-options input[type="radio"]:checked + span {
+        font-weight: 500;
+        color: #007bff;
+      }
     </style>
   </head>
   <body>
@@ -146,12 +190,52 @@
         <label for="fileInput" class="custom-upload"> Upload Screenshot </label>
         <p style="margin-top: 1rem; color: #6c757d">(PNG, JPG supported)</p>
       </div>
-
+      <div class="model-selection">
+        <h3>Select AI Model</h3>
+        <div class="model-options">
+          <label>
+            <input type="radio" name="model" value="gpt-4o" checked />
+            <span>GPT-4o (OpenAI)</span>
+          </label>
+          <label>
+            <input type="radio" name="model" value="qwen/qwen-vl-plus" />
+            <span>Qwen VL Plus (OpenRouter)</span>
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="model"
+              value="google/gemma-3-12b-it:free"
+            />
+            <span>Gemma 3 12B (OpenRouter)</span>
+          </label>
+        </div>
+      </div>
       <div class="button-group">
         <button class="clear-btn" id="clearBtn">Clear All</button>
         <button class="download-btn" id="downloadBtn">Download CSV</button>
       </div>
-
+      <div class="model-selection">
+        <h3>Select AI Model</h3>
+        <div class="model-options">
+          <label>
+            <input type="radio" name="model" value="gpt-4o" checked />
+            <span>GPT-4o (OpenAI)</span>
+          </label>
+          <label>
+            <input type="radio" name="model" value="qwen/qwen-vl-plus" />
+            <span>Qwen VL Plus (OpenRouter)</span>
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="model"
+              value="google/gemma-3-12b-it:free"
+            />
+            <span>Gemma 3 12B (OpenRouter)</span>
+          </label>
+        </div>
+      </div>
       <table>
         <thead>
           <tr>
@@ -430,8 +514,14 @@
       // Process a single image file and update UI in real time
       async function processImageFile(file, db, batchName) {
         const fileId = `file-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+        // Get the selected model
+        const selectedModel = document.querySelector(
+          'input[name="model"]:checked'
+        ).value;
+
         logStatus(
-          `Processing file: ${file.name} (ID: ${fileId}, Batch: ${batchName})`
+          `Processing file: ${file.name} (ID: ${fileId}, Batch: ${batchName}, Model: ${selectedModel})`
         );
 
         // Add a placeholder row to the table
@@ -470,9 +560,9 @@
             body: JSON.stringify({
               imageBase64: base64,
               filename: file.name,
+              selectedModel: selectedModel, // Add this line
             }),
           });
-
           logStatus(`API response status for ${fileId}: ${response.status}`);
 
           if (!response.ok) {

@@ -1,4 +1,3 @@
-// netlify/functions/analyze-image.js
 const axios = require("axios");
 
 exports.handler = async function (event, context) {
@@ -15,6 +14,7 @@ exports.handler = async function (event, context) {
     const body = JSON.parse(event.body);
     const imageBase64 = body.imageBase64;
     const filename = body.filename || "unknown";
+    const selectedModel = body.selectedModel || "gpt-4o"; // Default to gpt-4o if not specified
 
     if (!imageBase64) {
       return {
@@ -23,47 +23,96 @@ exports.handler = async function (event, context) {
       };
     }
 
-    console.log(`Processing file: ${filename}`);
+    console.log(`Processing file: ${filename} with model: ${selectedModel}`);
 
-    // Use a shorter timeout for the axios request to avoid Netlify timeouts
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-4o", // Consider using gpt-4o-mini for faster responses
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Analyze this image and extract text information visible such as: names, company names, job titles, and professional credentials. Format the information as:\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nFor multiple entries, separate with a blank line. For anything thats not visible, simply write '-' for consistency.",
-              },
-              {
-                type: "image_url",
-                image_url: { url: imageBase64 },
-              },
-            ],
-          },
-        ],
-        max_tokens: 1000,
-        temperature: 0.3, // Lower temperature for more consistent responses
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    let response;
+
+    // Determine which API to use based on the selected model
+    if (selectedModel === "gpt-4o") {
+      // OpenAI API call
+      response = await axios.post(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          model: "gpt-4o", // Consider using gpt-4o-mini for faster responses
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Analyze this image and extract text information visible such as: names, company names, job titles, and professional credentials. Format the information as:\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nFor multiple entries, separate with a blank line. For anything thats not visible, simply write '-' for consistency.",
+                },
+                {
+                  type: "image_url",
+                  image_url: { url: imageBase64 },
+                },
+              ],
+            },
+          ],
+          max_tokens: 1000,
+          temperature: 0.3, // Lower temperature for more consistent responses
         },
-        timeout: 9000, // 9 second timeout (giving buffer for Netlify's 10s limit)
-      }
-    );
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          },
+          timeout: 9000, // 9 second timeout (giving buffer for Netlify's 10s limit)
+        }
+      );
 
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        text: response.data.choices[0].message.content,
-        filename: filename,
-      }),
-    };
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          text: response.data.choices[0].message.content,
+          filename: filename,
+        }),
+      };
+    } else {
+      // OpenRouter API call for other models
+      const openRouterEndpoint =
+        "https://openrouter.ai/api/v1/chat/completions";
+
+      response = await axios.post(
+        openRouterEndpoint,
+        {
+          model: selectedModel, // Either "qwen/qwen-vl-plus" or "google/gemma-3-12b-it:free"
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Extract the full name, company name, job role, and professional credentials for ALL people visible in this image. If there are multiple people, list each person separately with a blank line between them. Format exactly as:\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nand so on for each person.",
+                },
+                {
+                  type: "image_url",
+                  image_url: { url: imageBase64 },
+                },
+              ],
+            },
+          ],
+        },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            "HTTP-Referer":
+              process.env.APP_URL || "https://screenshot-analyzer.netlify.app", // Required by OpenRouter
+            "X-Title": "Screenshot Analyzer", // Optional: app name
+          },
+          timeout: 9000,
+        }
+      );
+
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          text: response.data.choices[0].message.content,
+          filename: filename,
+        }),
+      };
+    }
   } catch (error) {
     console.error(`Error processing image: ${error.message}`);
 
@@ -78,13 +127,13 @@ exports.handler = async function (event, context) {
       };
     }
 
-    // Handle OpenAI API errors
+    // Handle OpenAI/OpenRouter API errors
     if (error.response && error.response.data) {
       const statusCode = error.response.status;
       const errorMessage =
         error.response.data.error?.message || error.response.statusText;
 
-      console.error(`OpenAI API error (${statusCode}): ${errorMessage}`);
+      console.error(`API error (${statusCode}): ${errorMessage}`);
 
       return {
         statusCode: statusCode,
