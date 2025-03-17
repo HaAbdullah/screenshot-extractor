@@ -175,8 +175,7 @@
     </div>
 
     <script>
-      // Modified script section for better performance and user feedback
-      // Add this to replace your existing script
+      // This is the corrected script section to replace your current script
 
       let entries = [];
       const DB_NAME = "screenshotAnalyzerDB";
@@ -200,6 +199,7 @@
             "Hide Debug Console";
         }
       }
+
       async function generateSequentialFilename(db) {
         const today = new Date();
         const dateString = today
@@ -246,6 +246,7 @@
               };
             } catch (error) {
               // Store may not exist yet
+              console.error("Error in getTodayFileCount:", error);
               resolve(0);
             }
           } else {
@@ -262,38 +263,43 @@
         const today = new Date().toDateString();
 
         if (db) {
-          // Ensure the store exists
-          if (!db.objectStoreNames.contains("fileCounters")) {
-            // Need to close and reopen the DB to create a new store
-            db.close();
-            const request = indexedDB.open(DB_NAME, 2);
+          try {
+            // Ensure the store exists
+            if (!db.objectStoreNames.contains("fileCounters")) {
+              // Need to close and reopen the DB to create a new store
+              db.close();
+              const request = indexedDB.open(DB_NAME, 2);
 
-            request.onupgradeneeded = (event) => {
-              const db = event.target.result;
-              if (!db.objectStoreNames.contains("fileCounters")) {
-                db.createObjectStore("fileCounters", { keyPath: "date" });
-              }
-            };
+              request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                if (!db.objectStoreNames.contains("fileCounters")) {
+                  db.createObjectStore("fileCounters", { keyPath: "date" });
+                }
+              };
 
-            request.onsuccess = (event) => {
-              const newDb = event.target.result;
-              const transaction = newDb.transaction(
-                ["fileCounters"],
-                "readwrite"
-              );
-              const store = transaction.objectStore("fileCounters");
-              store.put({ date: today, count: newCount });
-              logStatus(`Updated file counter to ${newCount}`);
-            };
+              request.onsuccess = (event) => {
+                const newDb = event.target.result;
+                const transaction = newDb.transaction(
+                  ["fileCounters"],
+                  "readwrite"
+                );
+                const store = transaction.objectStore("fileCounters");
+                store.put({ date: today, count: newCount });
+                logStatus(`Updated file counter to ${newCount}`);
+              };
 
-            return;
+              return;
+            }
+
+            // Store exists, update the counter
+            const transaction = db.transaction(["fileCounters"], "readwrite");
+            const store = transaction.objectStore("fileCounters");
+            store.put({ date: today, count: newCount });
+            logStatus(`Updated file counter to ${newCount}`);
+          } catch (error) {
+            console.error("Error in updateTodayFileCount:", error);
+            logStatus(`Error updating file counter: ${error.message}`, true);
           }
-
-          // Store exists, update the counter
-          const transaction = db.transaction(["fileCounters"], "readwrite");
-          const store = transaction.objectStore("fileCounters");
-          store.put({ date: today, count: newCount });
-          logStatus(`Updated file counter to ${newCount}`);
         } else {
           // Use localStorage as fallback
           const counterKey = `screenshotAnalyzer_fileCounter_${today}`;
@@ -303,7 +309,6 @@
       }
 
       // Initialize fileCounters store during DB initialization
-      // Modify your existing initDB function to include this:
       function initDB() {
         return new Promise((resolve, reject) => {
           if (!window.indexedDB) {
@@ -348,18 +353,32 @@
       // Save entries to storage
       async function saveEntries(db) {
         if (db) {
-          // Use IndexedDB
-          const transaction = db.transaction([STORE_NAME], "readwrite");
-          const store = transaction.objectStore(STORE_NAME);
+          try {
+            // Use IndexedDB
+            const transaction = db.transaction([STORE_NAME], "readwrite");
+            const store = transaction.objectStore(STORE_NAME);
 
-          // Clear existing entries
-          store.clear();
+            // Clear existing entries
+            store.clear();
 
-          // Add all current entries
-          entries.forEach((entry) => {
-            store.add(entry);
-          });
-          logStatus(`Saved ${entries.length} entries to IndexedDB`);
+            // Add all current entries
+            entries.forEach((entry) => {
+              store.add(entry);
+            });
+            logStatus(`Saved ${entries.length} entries to IndexedDB`);
+          } catch (error) {
+            console.error("Error saving entries to IndexedDB:", error);
+            logStatus(`Error saving entries: ${error.message}`, true);
+
+            // Fallback to localStorage
+            localStorage.setItem(
+              "screenshotAnalyzerEntries",
+              JSON.stringify(entries)
+            );
+            logStatus(
+              `Saved ${entries.length} entries to localStorage (fallback)`
+            );
+          }
         } else {
           // Use localStorage as fallback
           localStorage.setItem(
@@ -374,24 +393,39 @@
       async function loadEntries(db) {
         return new Promise((resolve, reject) => {
           if (db) {
-            // Use IndexedDB
-            const transaction = db.transaction([STORE_NAME], "readonly");
-            const store = transaction.objectStore(STORE_NAME);
-            const request = store.getAll();
+            try {
+              // Use IndexedDB
+              const transaction = db.transaction([STORE_NAME], "readonly");
+              const store = transaction.objectStore(STORE_NAME);
+              const request = store.getAll();
 
-            request.onsuccess = () => {
-              logStatus(
-                `Loaded ${
-                  request.result ? request.result.length : 0
-                } entries from IndexedDB`
+              request.onsuccess = () => {
+                logStatus(
+                  `Loaded ${
+                    request.result ? request.result.length : 0
+                  } entries from IndexedDB`
+                );
+                resolve(request.result || []);
+              };
+
+              request.onerror = (event) => {
+                logStatus("Error loading entries: " + event.target.error, true);
+                resolve([]);
+              };
+            } catch (error) {
+              console.error("Error in loadEntries:", error);
+              logStatus(`Error loading entries: ${error.message}`, true);
+
+              // Try localStorage as fallback
+              const savedEntries = localStorage.getItem(
+                "screenshotAnalyzerEntries"
               );
-              resolve(request.result || []);
-            };
-
-            request.onerror = (event) => {
-              logStatus("Error loading entries: " + event.target.error, true);
-              resolve([]);
-            };
+              const parsed = savedEntries ? JSON.parse(savedEntries) : [];
+              logStatus(
+                `Loaded ${parsed.length} entries from localStorage (fallback)`
+              );
+              resolve(parsed);
+            }
           } else {
             // Use localStorage as fallback
             const savedEntries = localStorage.getItem(
@@ -603,91 +637,68 @@
         );
       }
 
-      // Modify the downloadCSV function to use the sequential filename
+      // Download CSV function - fixed implementation
       async function downloadCSV() {
-        // Filter out placeholder and error entries
-        const dataEntries = entries.filter(
-          (entry) => !entry.isPlaceholder && !entry.isError
-        );
+        try {
+          logStatus("Starting CSV download process");
 
-        const headers = ["Name", "Company", "Role", "Credentials"];
-        const csvContent = [
-          headers.join(","),
-          ...dataEntries.map((entry) =>
-            [
+          // Filter out placeholder and error entries
+          const dataEntries = entries.filter(
+            (entry) => !entry.isPlaceholder && !entry.isError
+          );
+
+          if (dataEntries.length === 0) {
+            logStatus("No data to download", true);
+            alert(
+              "There is no data to download. Please process some images first."
+            );
+            return;
+          }
+
+          const headers = ["Name", "Company", "Role", "Credentials"];
+          const csvRows = [headers.join(",")];
+
+          // Add each entry as a row
+          dataEntries.forEach((entry) => {
+            const row = [
               `"${entry.name.replace(/"/g, '""')}"`,
               `"${entry.company.replace(/"/g, '""')}"`,
               `"${entry.role.replace(/"/g, '""')}"`,
               `"${entry.credentials.replace(/"/g, '""')}"`,
-            ].join(",")
-          ),
-        ].join("\n");
-
-        const blob = new Blob([csvContent], {
-          type: "text/csv;charset=utf-8;",
-        });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.setAttribute("href", url);
-
-        // Generate sequential filename
-        const fileName = await generateSequentialFilename(window.appDB);
-        link.setAttribute("download", `${fileName}.csv`);
-
-        link.style.visibility = "hidden";
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        logStatus(`Downloaded CSV file as ${fileName}.csv`);
-      }
-
-      async function init() {
-        logStatus("Initializing application");
-        const db = await initDB();
-        window.appDB = db; // Store reference globally
-        entries = await loadEntries(db);
-        updateTable();
-
-        document
-          .getElementById("downloadBtn")
-          .addEventListener("click", downloadCSV);
-
-        document
-          .getElementById("clearBtn")
-          .addEventListener("click", async () => {
-            entries = [];
-            updateTable();
-            await saveEntries(db);
-            logStatus("Cleared all entries");
+            ];
+            csvRows.push(row.join(","));
           });
 
-        // Toggle debug console
-        document.getElementById("debugToggle").addEventListener("click", () => {
-          const statusLog = document.getElementById("statusLog");
-          const debugToggle = document.getElementById("debugToggle");
-          if (statusLog.style.display === "none" || !statusLog.style.display) {
-            statusLog.style.display = "block";
-            debugToggle.textContent = "Hide Debug Console";
-          } else {
-            statusLog.style.display = "none";
-            debugToggle.textContent = "Show Debug Console";
-          }
-        });
+          const csvContent = csvRows.join("\n");
 
-        document
-          .getElementById("fileInput")
-          .addEventListener("change", async (e) => {
-            const files = e.target.files;
-            if (!files.length) {
-              logStatus("No files selected", true);
-              return;
-            }
-
-            await processFiles(files, db);
+          // Create blob and download link
+          const blob = new Blob([csvContent], {
+            type: "text/csv;charset=utf-8;",
           });
+          const url = URL.createObjectURL(blob);
 
-        logStatus("Application initialized successfully");
+          // Generate sequential filename
+          const fileName = await generateSequentialFilename(window.appDB);
+          logStatus(`Generated filename: ${fileName}.csv`);
+
+          // Create and trigger download
+          const link = document.createElement("a");
+          link.setAttribute("href", url);
+          link.setAttribute("download", `${fileName}.csv`);
+          link.style.visibility = "hidden";
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+
+          logStatus(
+            `Downloaded CSV file as ${fileName}.csv with ${dataEntries.length} entries`
+          );
+        } catch (error) {
+          console.error("Error in downloadCSV:", error);
+          logStatus(`Error downloading CSV: ${error.message}`, true);
+        }
       }
+
       async function processBatch(files, db) {
         const batchFileName = await generateSequentialFilename(db);
         logStatus(`Starting new batch: ${batchFileName}`);
@@ -698,20 +709,88 @@
         // Return the batch filename for potential use
         return batchFileName;
       }
-      document
-        .getElementById("fileInput")
-        .addEventListener("change", async (e) => {
-          const files = e.target.files;
-          if (!files.length) {
-            logStatus("No files selected", true);
-            return;
+
+      async function init() {
+        try {
+          logStatus("Initializing application");
+          const db = await initDB();
+          window.appDB = db; // Store reference globally
+          entries = await loadEntries(db);
+          updateTable();
+
+          // Set up event listeners - ensuring we only add them once
+          const downloadBtn = document.getElementById("downloadBtn");
+          if (downloadBtn) {
+            // Remove any existing listeners (to prevent duplicates)
+            downloadBtn.replaceWith(downloadBtn.cloneNode(true));
+            // Add the event listener to the fresh element
+            document
+              .getElementById("downloadBtn")
+              .addEventListener("click", () => {
+                logStatus("Download button clicked");
+                downloadCSV();
+              });
           }
 
-          const batchName = await processBatch(files, window.appDB);
-          // You could display the batch name in the UI if desired
-          // e.g., document.getElementById("currentBatch").textContent = batchName;
-        });
-      // Start the app when page loads
+          const clearBtn = document.getElementById("clearBtn");
+          if (clearBtn) {
+            clearBtn.replaceWith(clearBtn.cloneNode(true));
+            document
+              .getElementById("clearBtn")
+              .addEventListener("click", async () => {
+                entries = [];
+                updateTable();
+                await saveEntries(db);
+                logStatus("Cleared all entries");
+              });
+          }
+
+          // Toggle debug console
+          const debugToggle = document.getElementById("debugToggle");
+          if (debugToggle) {
+            debugToggle.replaceWith(debugToggle.cloneNode(true));
+            document
+              .getElementById("debugToggle")
+              .addEventListener("click", () => {
+                const statusLog = document.getElementById("statusLog");
+                const debugToggle = document.getElementById("debugToggle");
+                if (
+                  statusLog.style.display === "none" ||
+                  !statusLog.style.display
+                ) {
+                  statusLog.style.display = "block";
+                  debugToggle.textContent = "Hide Debug Console";
+                } else {
+                  statusLog.style.display = "none";
+                  debugToggle.textContent = "Show Debug Console";
+                }
+              });
+          }
+
+          const fileInput = document.getElementById("fileInput");
+          if (fileInput) {
+            fileInput.replaceWith(fileInput.cloneNode(true));
+            document
+              .getElementById("fileInput")
+              .addEventListener("change", async (e) => {
+                const files = e.target.files;
+                if (!files.length) {
+                  logStatus("No files selected", true);
+                  return;
+                }
+
+                await processBatch(files, db);
+              });
+          }
+
+          logStatus("Application initialized successfully");
+        } catch (error) {
+          console.error("Error during initialization:", error);
+          logStatus(`Initialization error: ${error.message}`, true);
+        }
+      }
+
+      // Start the app when page loads - ensure this is only called once
       window.addEventListener("DOMContentLoaded", init);
     </script>
   </body>
