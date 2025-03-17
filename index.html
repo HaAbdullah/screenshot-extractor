@@ -175,12 +175,11 @@
     </div>
 
     <script>
-      // Modified script section for better performance and user feedback
-      // Add this to replace your existing script
-
+      // Modified script section with batch naming feature
       let entries = [];
       const DB_NAME = "screenshotAnalyzerDB";
       const STORE_NAME = "entries";
+      const BATCH_COUNTER_STORE = "batchCounters";
 
       // Debug logging function
       function logStatus(message, isError = false) {
@@ -212,7 +211,7 @@
             return;
           }
 
-          const request = indexedDB.open(DB_NAME, 1);
+          const request = indexedDB.open(DB_NAME, 2); // Increased version to add batch counter store
 
           request.onerror = (event) => {
             logStatus("IndexedDB error: " + event.target.error, true);
@@ -227,6 +226,12 @@
                 autoIncrement: true,
               });
             }
+            // Add a new object store for batch counters
+            if (!db.objectStoreNames.contains(BATCH_COUNTER_STORE)) {
+              db.createObjectStore(BATCH_COUNTER_STORE, {
+                keyPath: "date",
+              });
+            }
           };
 
           request.onsuccess = (event) => {
@@ -234,6 +239,78 @@
             resolve(event.target.result);
           };
         });
+      }
+
+      // Generate batch name for current upload
+      async function generateBatchName(db) {
+        // Format current date as DDMonYYYY (e.g., 13Mar2025)
+        const now = new Date();
+        const day = now.getDate().toString().padStart(2, "0");
+        const month = now.toLocaleString("en-US", { month: "short" });
+        const year = now.getFullYear();
+        const dateStr = `${day}${month}${year}`;
+
+        let batchNumber = 1;
+
+        try {
+          if (db) {
+            // Use IndexedDB to get and update counter
+            const transaction = db.transaction(
+              [BATCH_COUNTER_STORE],
+              "readwrite"
+            );
+            const store = transaction.objectStore(BATCH_COUNTER_STORE);
+
+            // Get current date's counter
+            const currentDate = now.toISOString().split("T")[0]; // YYYY-MM-DD
+            const request = store.get(currentDate);
+
+            await new Promise((resolve, reject) => {
+              request.onsuccess = (event) => {
+                const result = event.target.result;
+                if (result) {
+                  // Increment existing counter
+                  batchNumber = result.counter + 1;
+                  store.put({ date: currentDate, counter: batchNumber });
+                } else {
+                  // Create new counter for today
+                  store.add({ date: currentDate, counter: 1 });
+                }
+                resolve();
+              };
+
+              request.onerror = (event) => {
+                logStatus(
+                  "Error getting batch counter: " + event.target.error,
+                  true
+                );
+                reject(event.target.error);
+              };
+            });
+          } else {
+            // Use localStorage as fallback
+            const storedCounters = localStorage.getItem("batchCounters");
+            if (storedCounters) {
+              const counters = JSON.parse(storedCounters);
+              const today = now.toISOString().split("T")[0]; // YYYY-MM-DD
+              if (counters[today]) {
+                batchNumber = counters[today] + 1;
+              }
+              counters[today] = batchNumber;
+              localStorage.setItem("batchCounters", JSON.stringify(counters));
+            } else {
+              const counters = {};
+              const today = now.toISOString().split("T")[0]; // YYYY-MM-DD
+              counters[today] = 1;
+              localStorage.setItem("batchCounters", JSON.stringify(counters));
+            }
+          }
+        } catch (error) {
+          logStatus("Error generating batch name: " + error.message, true);
+        }
+
+        // Format as "13Mar2025-1"
+        return `${dateStr}-${batchNumber}`;
       }
 
       // Save entries to storage
@@ -338,22 +415,24 @@
         tableBody.innerHTML = entries
           .map(
             (entry, index) => `
-        <tr id="entry-${index}">
-          <td>${entry.name}</td>
-          <td>${entry.company}</td>
-          <td>${entry.role}</td>
-          <td>${entry.credentials}</td>
-        </tr>
-      `
+  <tr id="entry-${index}">
+    <td>${entry.name}</td>
+    <td>${entry.company}</td>
+    <td>${entry.role}</td>
+    <td>${entry.credentials}</td>
+  </tr>
+`
           )
           .join("");
         logStatus(`Updated table with ${entries.length} entries`);
       }
 
       // Process a single image file and update UI in real time
-      async function processImageFile(file, db) {
+      async function processImageFile(file, db, batchName) {
         const fileId = `file-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        logStatus(`Processing file: ${file.name} (ID: ${fileId})`);
+        logStatus(
+          `Processing file: ${file.name} (ID: ${fileId}, Batch: ${batchName})`
+        );
 
         // Add a placeholder row to the table
         const placeholderEntry = {
@@ -364,6 +443,7 @@
           timestamp: new Date().toISOString(),
           isPlaceholder: true,
           fileId: fileId,
+          batchName: batchName,
         };
 
         entries.push(placeholderEntry);
@@ -425,7 +505,11 @@
           // Remove the placeholder
           entries = entries.filter((entry) => entry.fileId !== fileId);
 
-          // Add the new entries
+          // Add the new entries with batch name
+          newEntries.forEach((entry) => {
+            entry.batchName = batchName;
+          });
+
           entries = [...entries, ...newEntries];
 
           // Update table and save to storage
@@ -453,6 +537,7 @@
             credentials: "-",
             timestamp: new Date().toISOString(),
             isError: true,
+            batchName: batchName,
           };
 
           entries.push(errorEntry);
@@ -470,6 +555,15 @@
         const total = fileArray.length;
         const loading = document.getElementById("loading");
 
+        // Generate a batch name for this upload
+        const batchName = await generateBatchName(db);
+        logStatus(`Generated batch name: ${batchName}`);
+
+        // Update the download button text to include the batch name
+        document.getElementById(
+          "downloadBtn"
+        ).textContent = `Download CSV (${batchName})`;
+
         loading.textContent = `Analyzing 0/${total} files...`;
         loading.style.display = "block";
 
@@ -480,7 +574,7 @@
         for (let i = 0; i < fileArray.length; i += concurrencyLimit) {
           const batch = fileArray.slice(i, i + concurrencyLimit);
           const results = await Promise.all(
-            batch.map((file) => processImageFile(file, db))
+            batch.map((file) => processImageFile(file, db, batchName))
           );
 
           completed += batch.length;
@@ -490,26 +584,40 @@
 
         loading.style.display = "none";
         logStatus(
-          `Completed processing ${completed} files, extracted ${totalEntries} entries`
+          `Completed processing ${completed} files, extracted ${totalEntries} entries for batch ${batchName}`
         );
+
+        // Store the current batch name
+        window.currentBatchName = batchName;
       }
 
       // Download entries as CSV
       function downloadCSV() {
+        // Get the current batch name or use a default
+        const batchName =
+          window.currentBatchName ||
+          `export-${new Date().toISOString().slice(0, 10)}`;
+
         // Filter out placeholder and error entries
+        // If we have a current batch, only include entries from that batch
         const dataEntries = entries.filter(
-          (entry) => !entry.isPlaceholder && !entry.isError
+          (entry) =>
+            !entry.isPlaceholder &&
+            !entry.isError &&
+            (!window.currentBatchName ||
+              entry.batchName === window.currentBatchName)
         );
 
-        const headers = ["Name", "Company", "Role", "Credentials"];
+        const headers = ["Name", "Company", "Role", "Credentials", "Batch"];
         const csvContent = [
           headers.join(","),
           ...dataEntries.map((entry) =>
             [
-              `"${entry.name.replace(/"/g, '""')}"`,
-              `"${entry.company.replace(/"/g, '""')}"`,
-              `"${entry.role.replace(/"/g, '""')}"`,
-              `"${entry.credentials.replace(/"/g, '""')}"`,
+              `"${(entry.name || "").replace(/"/g, '""')}"`,
+              `"${(entry.company || "").replace(/"/g, '""')}"`,
+              `"${(entry.role || "").replace(/"/g, '""')}"`,
+              `"${(entry.credentials || "").replace(/"/g, '""')}"`,
+              `"${(entry.batchName || "").replace(/"/g, '""')}"`,
             ].join(",")
           ),
         ].join("\n");
@@ -520,15 +628,12 @@
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.setAttribute("href", url);
-        link.setAttribute(
-          "download",
-          `screenshot-analysis-${new Date().toISOString().slice(0, 10)}.csv`
-        );
+        link.setAttribute("download", `${batchName}.csv`);
         link.style.visibility = "hidden";
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        logStatus("Downloaded CSV file");
+        logStatus(`Downloaded CSV file: ${batchName}.csv`);
       }
 
       // Initialize the application
@@ -548,6 +653,10 @@
             entries = [];
             updateTable();
             await saveEntries(db);
+            // Reset the download button text
+            document.getElementById("downloadBtn").textContent = "Download CSV";
+            // Clear the current batch name
+            window.currentBatchName = null;
             logStatus("Cleared all entries");
           });
 
