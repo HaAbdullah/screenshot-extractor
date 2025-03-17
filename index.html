@@ -306,7 +306,7 @@
 
       // Generate batch name for current upload
       async function generateBatchName(db) {
-        // Format current date as DDMonYYYY (e.g., 13Mar2025)
+        // Format current date as a readable format for display
         const now = new Date();
         const day = now.getDate().toString().padStart(2, "0");
         const month = now.toLocaleString("en-US", { month: "short" });
@@ -372,8 +372,15 @@
           logStatus("Error generating batch name: " + error.message, true);
         }
 
-        // Format as "13Mar2025-1"
-        return `${dateStr}-${batchNumber}`;
+        // Create a more readable batch name for the UI display (March 17, 2025 - 1)
+        const readableMonth = now.toLocaleString("en-US", { month: "long" });
+        const readableDateStr = `${readableMonth} ${day}, ${year} - ${batchNumber}`;
+
+        // Return both the file name format and the display format
+        return {
+          fileName: `${dateStr}-${batchNumber}`,
+          displayName: readableDateStr,
+        };
       }
 
       // Save entries to storage
@@ -491,7 +498,7 @@
       }
 
       // Process a single image file and update UI in real time
-      async function processImageFile(file, db, batchName) {
+      async function processImageFile(file, db, batchInfo) {
         const fileId = `file-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
         // Get the selected model
@@ -500,7 +507,7 @@
         ).value;
 
         logStatus(
-          `Processing file: ${file.name} (ID: ${fileId}, Batch: ${batchName}, Model: ${selectedModel})`
+          `Processing file: ${file.name} (ID: ${fileId}, Batch: ${batchInfo.displayName}, Model: ${selectedModel})`
         );
 
         // Add a placeholder row to the table
@@ -512,7 +519,8 @@
           timestamp: new Date().toISOString(),
           isPlaceholder: true,
           fileId: fileId,
-          batchName: batchName,
+          batchName: batchInfo.fileName,
+          batchDisplayName: batchInfo.displayName,
         };
 
         entries.push(placeholderEntry);
@@ -539,7 +547,7 @@
             body: JSON.stringify({
               imageBase64: base64,
               filename: file.name,
-              selectedModel: selectedModel, // Add this line
+              selectedModel: selectedModel,
             }),
           });
           logStatus(`API response status for ${fileId}: ${response.status}`);
@@ -574,9 +582,10 @@
           // Remove the placeholder
           entries = entries.filter((entry) => entry.fileId !== fileId);
 
-          // Add the new entries with batch name
+          // Add the new entries with batch name information
           newEntries.forEach((entry) => {
-            entry.batchName = batchName;
+            entry.batchName = batchInfo.fileName;
+            entry.batchDisplayName = batchInfo.displayName;
           });
 
           entries = [...entries, ...newEntries];
@@ -606,7 +615,8 @@
             credentials: "-",
             timestamp: new Date().toISOString(),
             isError: true,
-            batchName: batchName,
+            batchName: batchInfo.fileName,
+            batchDisplayName: batchInfo.displayName,
           };
 
           entries.push(errorEntry);
@@ -625,13 +635,15 @@
         const loading = document.getElementById("loading");
 
         // Generate a batch name for this upload
-        const batchName = await generateBatchName(db);
-        logStatus(`Generated batch name: ${batchName}`);
+        const batchInfo = await generateBatchName(db);
+        logStatus(
+          `Generated batch name: ${batchInfo.displayName} (file: ${batchInfo.fileName})`
+        );
 
         // Update the download button text to include the batch name
         document.getElementById(
           "downloadBtn"
-        ).textContent = `Download CSV (${batchName})`;
+        ).textContent = `Download CSV (${batchInfo.displayName})`;
 
         loading.textContent = `Analyzing 0/${total} files...`;
         loading.style.display = "block";
@@ -643,7 +655,7 @@
         for (let i = 0; i < fileArray.length; i += concurrencyLimit) {
           const batch = fileArray.slice(i, i + concurrencyLimit);
           const results = await Promise.all(
-            batch.map((file) => processImageFile(file, db, batchName))
+            batch.map((file) => processImageFile(file, db, batchInfo))
           );
 
           completed += batch.length;
@@ -653,19 +665,25 @@
 
         loading.style.display = "none";
         logStatus(
-          `Completed processing ${completed} files, extracted ${totalEntries} entries for batch ${batchName}`
+          `Completed processing ${completed} files, extracted ${totalEntries} entries for batch ${batchInfo.displayName}`
         );
 
         // Store the current batch name
-        window.currentBatchName = batchName;
+        window.currentBatchName = batchInfo.fileName;
+        window.currentBatchDisplayName = batchInfo.displayName;
       }
 
       // Download entries as CSV
       function downloadCSV() {
         // Get the current batch name or use a default
-        const batchName =
+        const fileName =
           window.currentBatchName ||
           `export-${new Date().toISOString().slice(0, 10)}`;
+
+        // Use display name for the button
+        const displayName =
+          window.currentBatchDisplayName ||
+          `Export ${new Date().toLocaleDateString()}`;
 
         // Filter out placeholder and error entries
         // If we have a current batch, only include entries from that batch
@@ -686,7 +704,10 @@
               `"${(entry.company || "").replace(/"/g, '""')}"`,
               `"${(entry.role || "").replace(/"/g, '""')}"`,
               `"${(entry.credentials || "").replace(/"/g, '""')}"`,
-              `"${(entry.batchName || "").replace(/"/g, '""')}"`,
+              `"${(entry.batchDisplayName || entry.batchName || "").replace(
+                /"/g,
+                '""'
+              )}"`,
             ].join(",")
           ),
         ].join("\n");
@@ -697,13 +718,16 @@
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.setAttribute("href", url);
-        link.setAttribute("download", `${batchName}.csv`);
+        link.setAttribute("download", `${fileName}.csv`);
         link.style.visibility = "hidden";
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        logStatus(`Downloaded CSV file: ${batchName}.csv`);
+        logStatus(
+          `Downloaded CSV file: ${fileName}.csv with ${dataEntries.length} entries`
+        );
       }
+
       function resetFileInput() {
         // Reset the file input value when changing models
         document.getElementById("fileInput").value = "";
@@ -731,6 +755,7 @@
             document.getElementById("downloadBtn").textContent = "Download CSV";
             // Clear the current batch name
             window.currentBatchName = null;
+            window.currentBatchDisplayName = null;
             logStatus("Cleared all entries");
           });
 
