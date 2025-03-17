@@ -215,27 +215,6 @@
         <button class="clear-btn" id="clearBtn">Clear All</button>
         <button class="download-btn" id="downloadBtn">Download CSV</button>
       </div>
-      <div class="model-selection">
-        <h3>Select AI Model</h3>
-        <div class="model-options">
-          <label>
-            <input type="radio" name="model" value="gpt-4o" checked />
-            <span>GPT-4o (OpenAI)</span>
-          </label>
-          <label>
-            <input type="radio" name="model" value="qwen/qwen-vl-plus" />
-            <span>Qwen VL Plus (OpenRouter)</span>
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="model"
-              value="google/gemma-3-12b-it:free"
-            />
-            <span>Gemma 3 12B (OpenRouter)</span>
-          </label>
-        </div>
-      </div>
       <table>
         <thead>
           <tr>
@@ -725,6 +704,11 @@
         document.body.removeChild(link);
         logStatus(`Downloaded CSV file: ${batchName}.csv`);
       }
+      function resetFileInput() {
+        // Reset the file input value when changing models
+        document.getElementById("fileInput").value = "";
+        logStatus("Reset file input after model change");
+      }
 
       // Initialize the application
       async function init() {
@@ -774,7 +758,13 @@
 
             await processFiles(files, db);
           });
-
+        const modelRadios = document.querySelectorAll('input[name="model"]');
+        modelRadios.forEach((radio) => {
+          radio.addEventListener("change", () => {
+            logStatus(`Model changed to: ${radio.value}`);
+            resetFileInput();
+          });
+        });
         logStatus("Application initialized successfully");
       }
 
