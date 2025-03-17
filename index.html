@@ -175,7 +175,7 @@
     </div>
 
     <script>
-      // Modified script section with batch naming feature
+      <<<<<<// Modified script section with batch naming feature
       let entries = [];
       const DB_NAME = "screenshotAnalyzerDB";
       const STORE_NAME = "entries";
@@ -229,7 +229,7 @@
             // Add a new object store for batch counters
             if (!db.objectStoreNames.contains(BATCH_COUNTER_STORE)) {
               db.createObjectStore(BATCH_COUNTER_STORE, {
-                keyPath: "date",
+                keyPath: "date"
               });
             }
           };
@@ -245,8 +245,8 @@
       async function generateBatchName(db) {
         // Format current date as DDMonYYYY (e.g., 13Mar2025)
         const now = new Date();
-        const day = now.getDate().toString().padStart(2, "0");
-        const month = now.toLocaleString("en-US", { month: "short" });
+        const day = now.getDate().toString().padStart(2, '0');
+        const month = now.toLocaleString('en-US', { month: 'short' });
         const year = now.getFullYear();
         const dateStr = `${day}${month}${year}`;
 
@@ -255,14 +255,11 @@
         try {
           if (db) {
             // Use IndexedDB to get and update counter
-            const transaction = db.transaction(
-              [BATCH_COUNTER_STORE],
-              "readwrite"
-            );
+            const transaction = db.transaction([BATCH_COUNTER_STORE], "readwrite");
             const store = transaction.objectStore(BATCH_COUNTER_STORE);
 
             // Get current date's counter
-            const currentDate = now.toISOString().split("T")[0]; // YYYY-MM-DD
+            const currentDate = now.toISOString().split('T')[0]; // YYYY-MM-DD
             const request = store.get(currentDate);
 
             await new Promise((resolve, reject) => {
@@ -280,10 +277,7 @@
               };
 
               request.onerror = (event) => {
-                logStatus(
-                  "Error getting batch counter: " + event.target.error,
-                  true
-                );
+                logStatus("Error getting batch counter: " + event.target.error, true);
                 reject(event.target.error);
               };
             });
@@ -292,7 +286,7 @@
             const storedCounters = localStorage.getItem("batchCounters");
             if (storedCounters) {
               const counters = JSON.parse(storedCounters);
-              const today = now.toISOString().split("T")[0]; // YYYY-MM-DD
+              const today = now.toISOString().split('T')[0]; // YYYY-MM-DD
               if (counters[today]) {
                 batchNumber = counters[today] + 1;
               }
@@ -300,7 +294,7 @@
               localStorage.setItem("batchCounters", JSON.stringify(counters));
             } else {
               const counters = {};
-              const today = now.toISOString().split("T")[0]; // YYYY-MM-DD
+              const today = now.toISOString().split('T')[0]; // YYYY-MM-DD
               counters[today] = 1;
               localStorage.setItem("batchCounters", JSON.stringify(counters));
             }
@@ -415,13 +409,13 @@
         tableBody.innerHTML = entries
           .map(
             (entry, index) => `
-  <tr id="entry-${index}">
-    <td>${entry.name}</td>
-    <td>${entry.company}</td>
-    <td>${entry.role}</td>
-    <td>${entry.credentials}</td>
-  </tr>
-`
+        <tr id="entry-${index}">
+          <td>${entry.name}</td>
+          <td>${entry.company}</td>
+          <td>${entry.role}</td>
+          <td>${entry.credentials}</td>
+        </tr>
+      `
           )
           .join("");
         logStatus(`Updated table with ${entries.length} entries`);
@@ -430,9 +424,7 @@
       // Process a single image file and update UI in real time
       async function processImageFile(file, db, batchName) {
         const fileId = `file-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        logStatus(
-          `Processing file: ${file.name} (ID: ${fileId}, Batch: ${batchName})`
-        );
+        logStatus(`Processing file: ${file.name} (ID: ${fileId}, Batch: ${batchName})`);
 
         // Add a placeholder row to the table
         const placeholderEntry = {
@@ -443,7 +435,7 @@
           timestamp: new Date().toISOString(),
           isPlaceholder: true,
           fileId: fileId,
-          batchName: batchName,
+          batchName: batchName
         };
 
         entries.push(placeholderEntry);
@@ -506,7 +498,7 @@
           entries = entries.filter((entry) => entry.fileId !== fileId);
 
           // Add the new entries with batch name
-          newEntries.forEach((entry) => {
+          newEntries.forEach(entry => {
             entry.batchName = batchName;
           });
 
@@ -537,7 +529,7 @@
             credentials: "-",
             timestamp: new Date().toISOString(),
             isError: true,
-            batchName: batchName,
+            batchName: batchName
           };
 
           entries.push(errorEntry);
@@ -560,9 +552,7 @@
         logStatus(`Generated batch name: ${batchName}`);
 
         // Update the download button text to include the batch name
-        document.getElementById(
-          "downloadBtn"
-        ).textContent = `Download CSV (${batchName})`;
+        document.getElementById("downloadBtn").textContent = `Download CSV (${batchName})`;
 
         loading.textContent = `Analyzing 0/${total} files...`;
         loading.style.display = "block";
@@ -594,18 +584,13 @@
       // Download entries as CSV
       function downloadCSV() {
         // Get the current batch name or use a default
-        const batchName =
-          window.currentBatchName ||
-          `export-${new Date().toISOString().slice(0, 10)}`;
+        const batchName = window.currentBatchName || `export-${new Date().toISOString().slice(0, 10)}`;
 
         // Filter out placeholder and error entries
         // If we have a current batch, only include entries from that batch
         const dataEntries = entries.filter(
-          (entry) =>
-            !entry.isPlaceholder &&
-            !entry.isError &&
-            (!window.currentBatchName ||
-              entry.batchName === window.currentBatchName)
+          (entry) => !entry.isPlaceholder && !entry.isError &&
+          (!window.currentBatchName || entry.batchName === window.currentBatchName)
         );
 
         const headers = ["Name", "Company", "Role", "Credentials", "Batch"];
@@ -613,11 +598,11 @@
           headers.join(","),
           ...dataEntries.map((entry) =>
             [
-              `"${(entry.name || "").replace(/"/g, '""')}"`,
-              `"${(entry.company || "").replace(/"/g, '""')}"`,
-              `"${(entry.role || "").replace(/"/g, '""')}"`,
-              `"${(entry.credentials || "").replace(/"/g, '""')}"`,
-              `"${(entry.batchName || "").replace(/"/g, '""')}"`,
+              `"${(entry.name || '').replace(/"/g, '""')}"`,
+              `"${(entry.company || '').replace(/"/g, '""')}"`,
+              `"${(entry.role || '').replace(/"/g, '""')}"`,
+              `"${(entry.credentials || '').replace(/"/g, '""')}"`,
+              `"${(entry.batchName || '').replace(/"/g, '""')}"`,
             ].join(",")
           ),
         ].join("\n");
@@ -628,7 +613,10 @@
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.setAttribute("href", url);
-        link.setAttribute("download", `${batchName}.csv`);
+        link.setAttribute(
+          "download",
+          `${batchName}.csv`
+        );
         link.style.visibility = "hidden";
         document.body.appendChild(link);
         link.click();
