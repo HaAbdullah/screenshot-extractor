@@ -200,8 +200,110 @@
             "Hide Debug Console";
         }
       }
+      async function generateSequentialFilename(db) {
+        const today = new Date();
+        const dateString = today
+          .toLocaleDateString("en-GB", {
+            day: "2-digit",
+            month: "short",
+            year: "numeric",
+          })
+          .replace(/ /g, "");
 
-      // Initialize IndexedDB
+        // Get the next sequence number for today
+        const sequenceNumber = (await getTodayFileCount(db)) + 1;
+
+        // Store the new count
+        await updateTodayFileCount(db, sequenceNumber);
+
+        // Format: 13Mar2025-1
+        return `${dateString}-${sequenceNumber}`;
+      }
+
+      // Function to get today's file count from storage
+      async function getTodayFileCount(db) {
+        const today = new Date().toDateString();
+
+        return new Promise((resolve, reject) => {
+          if (db) {
+            // Use IndexedDB
+            try {
+              const transaction = db.transaction(["fileCounters"], "readonly");
+              const store = transaction.objectStore("fileCounters");
+              const request = store.get(today);
+
+              request.onsuccess = () => {
+                const result = request.result;
+                resolve(result ? result.count : 0);
+              };
+
+              request.onerror = (event) => {
+                console.error(
+                  "Error fetching file counter:",
+                  event.target.error
+                );
+                resolve(0);
+              };
+            } catch (error) {
+              // Store may not exist yet
+              resolve(0);
+            }
+          } else {
+            // Use localStorage as fallback
+            const counterKey = `screenshotAnalyzer_fileCounter_${today}`;
+            const count = localStorage.getItem(counterKey);
+            resolve(count ? parseInt(count, 10) : 0);
+          }
+        });
+      }
+
+      // Function to update today's file count in storage
+      async function updateTodayFileCount(db, newCount) {
+        const today = new Date().toDateString();
+
+        if (db) {
+          // Ensure the store exists
+          if (!db.objectStoreNames.contains("fileCounters")) {
+            // Need to close and reopen the DB to create a new store
+            db.close();
+            const request = indexedDB.open(DB_NAME, 2);
+
+            request.onupgradeneeded = (event) => {
+              const db = event.target.result;
+              if (!db.objectStoreNames.contains("fileCounters")) {
+                db.createObjectStore("fileCounters", { keyPath: "date" });
+              }
+            };
+
+            request.onsuccess = (event) => {
+              const newDb = event.target.result;
+              const transaction = newDb.transaction(
+                ["fileCounters"],
+                "readwrite"
+              );
+              const store = transaction.objectStore("fileCounters");
+              store.put({ date: today, count: newCount });
+              logStatus(`Updated file counter to ${newCount}`);
+            };
+
+            return;
+          }
+
+          // Store exists, update the counter
+          const transaction = db.transaction(["fileCounters"], "readwrite");
+          const store = transaction.objectStore("fileCounters");
+          store.put({ date: today, count: newCount });
+          logStatus(`Updated file counter to ${newCount}`);
+        } else {
+          // Use localStorage as fallback
+          const counterKey = `screenshotAnalyzer_fileCounter_${today}`;
+          localStorage.setItem(counterKey, newCount.toString());
+          logStatus(`Updated file counter to ${newCount} (localStorage)`);
+        }
+      }
+
+      // Initialize fileCounters store during DB initialization
+      // Modify your existing initDB function to include this:
       function initDB() {
         return new Promise((resolve, reject) => {
           if (!window.indexedDB) {
@@ -212,7 +314,7 @@
             return;
           }
 
-          const request = indexedDB.open(DB_NAME, 1);
+          const request = indexedDB.open(DB_NAME, 2); // Increased version number
 
           request.onerror = (event) => {
             logStatus("IndexedDB error: " + event.target.error, true);
@@ -221,11 +323,18 @@
 
           request.onupgradeneeded = (event) => {
             const db = event.target.result;
+
+            // Create entries store if it doesn't exist
             if (!db.objectStoreNames.contains(STORE_NAME)) {
               db.createObjectStore(STORE_NAME, {
                 keyPath: "id",
                 autoIncrement: true,
               });
+            }
+
+            // Create fileCounters store if it doesn't exist
+            if (!db.objectStoreNames.contains("fileCounters")) {
+              db.createObjectStore("fileCounters", { keyPath: "date" });
             }
           };
 
@@ -494,8 +603,8 @@
         );
       }
 
-      // Download entries as CSV
-      function downloadCSV() {
+      // Modify the downloadCSV function to use the sequential filename
+      async function downloadCSV() {
         // Filter out placeholder and error entries
         const dataEntries = entries.filter(
           (entry) => !entry.isPlaceholder && !entry.isError
@@ -520,21 +629,22 @@
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.setAttribute("href", url);
-        link.setAttribute(
-          "download",
-          `screenshot-analysis-${new Date().toISOString().slice(0, 10)}.csv`
-        );
+
+        // Generate sequential filename
+        const fileName = await generateSequentialFilename(window.appDB);
+        link.setAttribute("download", `${fileName}.csv`);
+
         link.style.visibility = "hidden";
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        logStatus("Downloaded CSV file");
+        logStatus(`Downloaded CSV file as ${fileName}.csv`);
       }
 
-      // Initialize the application
       async function init() {
         logStatus("Initializing application");
         const db = await initDB();
+        window.appDB = db; // Store reference globally
         entries = await loadEntries(db);
         updateTable();
 
@@ -578,7 +688,29 @@
 
         logStatus("Application initialized successfully");
       }
+      async function processBatch(files, db) {
+        const batchFileName = await generateSequentialFilename(db);
+        logStatus(`Starting new batch: ${batchFileName}`);
 
+        // Process the files
+        await processFiles(files, db);
+
+        // Return the batch filename for potential use
+        return batchFileName;
+      }
+      document
+        .getElementById("fileInput")
+        .addEventListener("change", async (e) => {
+          const files = e.target.files;
+          if (!files.length) {
+            logStatus("No files selected", true);
+            return;
+          }
+
+          const batchName = await processBatch(files, window.appDB);
+          // You could display the batch name in the UI if desired
+          // e.g., document.getElementById("currentBatch").textContent = batchName;
+        });
       // Start the app when page loads
       window.addEventListener("DOMContentLoaded", init);
     </script>
