@@ -175,6 +175,9 @@
     </div>
 
     <script>
+      // Modified script section for better performance and user feedback
+      // Add this to replace your existing script
+
       let entries = [];
       const DB_NAME = "screenshotAnalyzerDB";
       const STORE_NAME = "entries";
@@ -334,25 +337,174 @@
         const tableBody = document.getElementById("tableBody");
         tableBody.innerHTML = entries
           .map(
-            (entry) => `
-              <tr>
-                <td>${entry.name}</td>
-                <td>${entry.company}</td>
-                <td>${entry.role}</td>
-                <td>${entry.credentials}</td>
-              </tr>
-            `
+            (entry, index) => `
+        <tr id="entry-${index}">
+          <td>${entry.name}</td>
+          <td>${entry.company}</td>
+          <td>${entry.role}</td>
+          <td>${entry.credentials}</td>
+        </tr>
+      `
           )
           .join("");
         logStatus(`Updated table with ${entries.length} entries`);
       }
 
+      // Process a single image file and update UI in real time
+      async function processImageFile(file, db) {
+        const fileId = `file-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        logStatus(`Processing file: ${file.name} (ID: ${fileId})`);
+
+        // Add a placeholder row to the table
+        const placeholderEntry = {
+          name: `Analyzing ${file.name}...`,
+          company: "In progress",
+          role: "-",
+          credentials: "-",
+          timestamp: new Date().toISOString(),
+          isPlaceholder: true,
+          fileId: fileId,
+        };
+
+        entries.push(placeholderEntry);
+        updateTable();
+
+        try {
+          // Convert image to base64
+          const base64 = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = (error) => reject(error);
+          });
+
+          logStatus(`Image ${fileId} converted to base64`);
+          logStatus(`Sending request to serverless function for ${fileId}`);
+
+          // Call your Netlify Function
+          const response = await fetch("/.netlify/functions/analyze-image", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              imageBase64: base64,
+              filename: file.name,
+            }),
+          });
+
+          logStatus(`API response status for ${fileId}: ${response.status}`);
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            logStatus(`API Error Response for ${fileId}: ${errorText}`, true);
+            throw new Error(
+              `Server Error: ${response.status} ${response.statusText}`
+            );
+          }
+
+          const data = await response.json();
+          logStatus(`Successfully received API response for ${fileId}`);
+
+          if (data.error) {
+            throw new Error(`API Error: ${data.error}`);
+          }
+
+          const analysis = data.text;
+          logStatus(
+            `Received analysis text for ${fileId}: ${analysis.substring(
+              0,
+              50
+            )}...`
+          );
+
+          // Parse multiple people from the response
+          const newEntries = parseMultiplePersons(analysis);
+          logStatus(`Extracted ${newEntries.length} people from ${fileId}`);
+
+          // Remove the placeholder
+          entries = entries.filter((entry) => entry.fileId !== fileId);
+
+          // Add the new entries
+          entries = [...entries, ...newEntries];
+
+          // Update table and save to storage
+          updateTable();
+          await saveEntries(db);
+
+          return newEntries.length;
+        } catch (error) {
+          logStatus(
+            `Error processing file ${file.name} (${fileId}): ${error.message}`,
+            true
+          );
+
+          // Remove the placeholder entry
+          entries = entries.filter((entry) => entry.fileId !== fileId);
+          updateTable();
+
+          // Add an error entry
+          const errorEntry = {
+            name: `Failed: ${file.name}`,
+            company: "Error",
+            role:
+              error.message.substring(0, 30) +
+              (error.message.length > 30 ? "..." : ""),
+            credentials: "-",
+            timestamp: new Date().toISOString(),
+            isError: true,
+          };
+
+          entries.push(errorEntry);
+          updateTable();
+          await saveEntries(db);
+
+          return 0;
+        }
+      }
+
+      // Process multiple files with limited concurrency
+      async function processFiles(files, db) {
+        const concurrencyLimit = 3; // Process 3 files at a time
+        const fileArray = Array.from(files);
+        const total = fileArray.length;
+        const loading = document.getElementById("loading");
+
+        loading.textContent = `Analyzing 0/${total} files...`;
+        loading.style.display = "block";
+
+        let completed = 0;
+        let totalEntries = 0;
+
+        // Process files in batches
+        for (let i = 0; i < fileArray.length; i += concurrencyLimit) {
+          const batch = fileArray.slice(i, i + concurrencyLimit);
+          const results = await Promise.all(
+            batch.map((file) => processImageFile(file, db))
+          );
+
+          completed += batch.length;
+          totalEntries += results.reduce((sum, count) => sum + count, 0);
+          loading.textContent = `Analyzing ${completed}/${total} files...`;
+        }
+
+        loading.style.display = "none";
+        logStatus(
+          `Completed processing ${completed} files, extracted ${totalEntries} entries`
+        );
+      }
+
       // Download entries as CSV
       function downloadCSV() {
+        // Filter out placeholder and error entries
+        const dataEntries = entries.filter(
+          (entry) => !entry.isPlaceholder && !entry.isError
+        );
+
         const headers = ["Name", "Company", "Role", "Credentials"];
         const csvContent = [
           headers.join(","),
-          ...entries.map((entry) =>
+          ...dataEntries.map((entry) =>
             [
               `"${entry.name.replace(/"/g, '""')}"`,
               `"${entry.company.replace(/"/g, '""')}"`,
@@ -421,92 +573,7 @@
               return;
             }
 
-            const loading = document.getElementById("loading");
-            loading.style.display = "block";
-
-            logStatus(`Processing ${files.length} files`);
-
-            try {
-              for (const file of files) {
-                logStatus(`Processing file: ${file.name}`);
-                // Convert image to base64
-                const base64 = await new Promise((resolve, reject) => {
-                  const reader = new FileReader();
-                  reader.readAsDataURL(file);
-                  reader.onload = () => resolve(reader.result);
-                  reader.onerror = (error) => reject(error);
-                });
-
-                logStatus("Image converted to base64");
-                logStatus("Sending request to the serverless function");
-
-                try {
-                  // Call your Netlify Function instead of directly calling OpenAI
-                  const response = await fetch(
-                    "/.netlify/functions/analyze-image",
-                    {
-                      method: "POST",
-                      headers: {
-                        "Content-Type": "application/json",
-                      },
-                      body: JSON.stringify({
-                        imageBase64: base64,
-                      }),
-                    }
-                  );
-
-                  logStatus(`API response status: ${response.status}`);
-
-                  if (!response.ok) {
-                    const errorText = await response.text();
-                    logStatus(`API Error Response: ${errorText}`, true);
-                    throw new Error(
-                      `Server Error: ${response.status} ${response.statusText}`
-                    );
-                  }
-
-                  const data = await response.json();
-                  logStatus("Successfully received API response");
-
-                  if (data.error) {
-                    throw new Error(`API Error: ${data.error}`);
-                  }
-
-                  const analysis = data.text;
-                  logStatus(
-                    `Received analysis text: ${analysis.substring(0, 50)}...`
-                  );
-
-                  // Parse multiple people from the response
-                  const newEntries = parseMultiplePersons(analysis);
-                  logStatus(
-                    `Extracted ${newEntries.length} people from the analysis`
-                  );
-
-                  // Add to existing entries
-                  entries = [...entries, ...newEntries];
-                } catch (apiError) {
-                  logStatus(
-                    `Error processing file ${file.name}: ${apiError.message}`,
-                    true
-                  );
-                  alert(
-                    `Error processing file ${file.name}: ${apiError.message}`
-                  );
-                }
-              }
-
-              // Update table and save to storage
-              updateTable();
-              await saveEntries(db);
-              logStatus("All files processed successfully");
-            } catch (error) {
-              logStatus(`Error: ${error.message}`, true);
-              console.error(error);
-              alert(`Error: ${error.message}`);
-            } finally {
-              loading.style.display = "none";
-            }
+            await processFiles(files, db);
           });
 
         logStatus("Application initialized successfully");
