@@ -134,6 +134,7 @@
       .debug-toggle:hover {
         text-decoration: underline;
       }
+
       .model-selection {
         margin-bottom: 1.5rem;
         padding: 1rem;
@@ -178,18 +179,33 @@
         font-weight: 500;
         color: #007bff;
       }
+
+      .rate-limit-warning {
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        color: #856404;
+        padding: 1rem;
+        border-radius: 6px;
+        margin-bottom: 1rem;
+        display: none;
+      }
     </style>
   </head>
   <body>
     <div class="container">
       <h1>Screenshot Analyzer</h1>
 
+      <div class="rate-limit-warning" id="rateLimitWarning">
+        <strong>Rate Limit Notice:</strong> Processing images slowly to avoid
+        API limits. Each image waits 3+ seconds between requests.
+      </div>
+
       <div class="upload-section">
         <input type="file" id="fileInput" accept="image/*" multiple />
-
         <label for="fileInput" class="custom-upload"> Upload Screenshot </label>
         <p style="margin-top: 1rem; color: #6c757d">(PNG, JPG supported)</p>
       </div>
+
       <div class="model-selection">
         <h3>Select AI Model</h3>
         <div class="model-options">
@@ -211,10 +227,12 @@
           </label>
         </div>
       </div>
+
       <div class="button-group">
         <button class="clear-btn" id="clearBtn">Clear All</button>
         <button class="download-btn" id="downloadBtn">Download CSV</button>
       </div>
+
       <table>
         <thead>
           <tr>
@@ -238,15 +256,13 @@
     </div>
 
     <script>
-      // Modified script section with smart rate limiting
+      // Modified script section with improved rate limiting
       let entries = [];
       const DB_NAME = "screenshotAnalyzerDB";
       const STORE_NAME = "entries";
       const BATCH_COUNTER_STORE = "batchCounters";
 
-      // Replace your existing rate limiting code with this improved version
-
-      // Rate limiting state management - much more conservative
+      // Improved rate limiting state management
       let lastRequestTime = 0;
       let requestQueue = [];
       let activeRequests = 0;
@@ -296,12 +312,301 @@
         }
       }
 
+      // Debug logging function
+      function logStatus(message, isError = false) {
+        const statusText = document.getElementById("statusText");
+        const timestamp = new Date().toLocaleTimeString();
+        const logEntry = `[${timestamp}] ${
+          isError ? "❌ ERROR: " : "✓ "
+        } ${message}`;
+        statusText.innerHTML += logEntry + "\n";
+        statusText.scrollTop = statusText.scrollHeight;
+        console.log(logEntry);
+
+        // Show the log if it's an error
+        if (isError) {
+          document.getElementById("statusLog").style.display = "block";
+          document.getElementById("debugToggle").textContent =
+            "Hide Debug Console";
+        }
+      }
+
+      // Initialize IndexedDB
+      function initDB() {
+        return new Promise((resolve, reject) => {
+          if (!window.indexedDB) {
+            logStatus(
+              "Your browser doesn't support IndexedDB. Using local storage instead."
+            );
+            resolve(null);
+            return;
+          }
+
+          const request = indexedDB.open(DB_NAME, 2);
+
+          request.onerror = (event) => {
+            logStatus("IndexedDB error: " + event.target.error, true);
+            resolve(null);
+          };
+
+          request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+              db.createObjectStore(STORE_NAME, {
+                keyPath: "id",
+                autoIncrement: true,
+              });
+            }
+            if (!db.objectStoreNames.contains(BATCH_COUNTER_STORE)) {
+              db.createObjectStore(BATCH_COUNTER_STORE, {
+                keyPath: "date",
+              });
+            }
+          };
+
+          request.onsuccess = (event) => {
+            logStatus("Database initialized successfully");
+            resolve(event.target.result);
+          };
+        });
+      }
+
+      // Generate batch name for current upload
+      async function generateBatchName(db) {
+        const now = new Date();
+        const day = now.getDate().toString().padStart(2, "0");
+        const month = now.toLocaleString("en-US", { month: "short" });
+        const year = now.getFullYear();
+        const dateStr = `${day}${month}${year}`;
+
+        let batchNumber = 1;
+
+        try {
+          if (db) {
+            const transaction = db.transaction(
+              [BATCH_COUNTER_STORE],
+              "readwrite"
+            );
+            const store = transaction.objectStore(BATCH_COUNTER_STORE);
+            const currentDate = now.toISOString().split("T")[0];
+            const request = store.get(currentDate);
+
+            await new Promise((resolve, reject) => {
+              request.onsuccess = (event) => {
+                const result = event.target.result;
+                if (result) {
+                  batchNumber = result.counter + 1;
+                  store.put({ date: currentDate, counter: batchNumber });
+                } else {
+                  store.add({ date: currentDate, counter: 1 });
+                }
+                resolve();
+              };
+
+              request.onerror = (event) => {
+                logStatus(
+                  "Error getting batch counter: " + event.target.error,
+                  true
+                );
+                reject(event.target.error);
+              };
+            });
+          } else {
+            const storedCounters = localStorage.getItem("batchCounters");
+            if (storedCounters) {
+              const counters = JSON.parse(storedCounters);
+              const today = now.toISOString().split("T")[0];
+              if (counters[today]) {
+                batchNumber = counters[today] + 1;
+              }
+              counters[today] = batchNumber;
+              localStorage.setItem("batchCounters", JSON.stringify(counters));
+            } else {
+              const counters = {};
+              const today = now.toISOString().split("T")[0];
+              counters[today] = 1;
+              localStorage.setItem("batchCounters", JSON.stringify(counters));
+            }
+          }
+        } catch (error) {
+          logStatus("Error generating batch name: " + error.message, true);
+        }
+
+        const readableMonth = now.toLocaleString("en-US", { month: "long" });
+        const readableDateStr = `${readableMonth} ${day}, ${year} - ${batchNumber}`;
+
+        return {
+          fileName: `${dateStr}-${batchNumber}`,
+          displayName: readableDateStr,
+        };
+      }
+
+      // Save entries to storage
+      async function saveEntries(db) {
+        if (db) {
+          const transaction = db.transaction([STORE_NAME], "readwrite");
+          const store = transaction.objectStore(STORE_NAME);
+          store.clear();
+          entries.forEach((entry) => {
+            store.add(entry);
+          });
+          logStatus(`Saved ${entries.length} entries to IndexedDB`);
+        } else {
+          localStorage.setItem(
+            "screenshotAnalyzerEntries",
+            JSON.stringify(entries)
+          );
+          logStatus(`Saved ${entries.length} entries to localStorage`);
+        }
+      }
+
+      // Load entries from storage
+      async function loadEntries(db) {
+        return new Promise((resolve, reject) => {
+          if (db) {
+            const transaction = db.transaction([STORE_NAME], "readonly");
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.getAll();
+
+            request.onsuccess = () => {
+              logStatus(
+                `Loaded ${
+                  request.result ? request.result.length : 0
+                } entries from IndexedDB`
+              );
+              resolve(request.result || []);
+            };
+
+            request.onerror = (event) => {
+              logStatus("Error loading entries: " + event.target.error, true);
+              resolve([]);
+            };
+          } else {
+            const savedEntries = localStorage.getItem(
+              "screenshotAnalyzerEntries"
+            );
+            const parsed = savedEntries ? JSON.parse(savedEntries) : [];
+            logStatus(`Loaded ${parsed.length} entries from localStorage`);
+            resolve(parsed);
+          }
+        });
+      }
+
+      // Parse the AI response for multiple people
+      function parseMultiplePersons(text) {
+        logStatus("Parsing AI response");
+        const personBlocks = text.split(/\n\s*\n/);
+        logStatus(`Found ${personBlocks.length} person blocks in response`);
+
+        const results = personBlocks
+          .map((block) => {
+            const result = block.split("\n").reduce((acc, line) => {
+              if (line.includes(": ")) {
+                const [key, value] = line.split(": ").map((s) => s.trim());
+                acc[key.toLowerCase()] = value;
+              }
+              return acc;
+            }, {});
+
+            return {
+              name: result.name || "N/A",
+              company: result.company || "N/A",
+              role: result.role || "N/A",
+              credentials: result.credentials || "N/A",
+              timestamp: new Date().toISOString(),
+            };
+          })
+          .filter(
+            (person) => person.name !== "N/A" || person.company !== "N/A"
+          );
+
+        logStatus(
+          `Successfully parsed ${results.length} people from the response`
+        );
+        return results;
+      }
+
+      // Update the table with entries
+      function updateTable() {
+        const tableBody = document.getElementById("tableBody");
+        tableBody.innerHTML = entries
+          .map(
+            (entry, index) => `
+    <tr id="entry-${index}">
+      <td>${entry.name}</td>
+      <td>${entry.company}</td>
+      <td>${entry.role}</td>
+      <td>${entry.credentials}</td>
+    </tr>
+  `
+          )
+          .join("");
+        logStatus(`Updated table with ${entries.length} entries`);
+      }
+
+      // Single attempt function with improved error handling
+      async function processImageFileOnce(
+        file,
+        fileId,
+        batchInfo,
+        selectedModel
+      ) {
+        const base64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.readAsDataURL(file);
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = (error) => reject(error);
+        });
+
+        logStatus(`Sending API request for ${fileId} using ${selectedModel}`);
+
+        const response = await fetch("/.netlify/functions/analyze-image", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            imageBase64: base64,
+            filename: file.name,
+            selectedModel: selectedModel,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          let errorData;
+          try {
+            errorData = JSON.parse(errorText);
+          } catch {
+            errorData = { error: errorText };
+          }
+
+          const error = new Error(
+            errorData.error ||
+              `API Error: ${response.status} ${response.statusText}`
+          );
+          error.status = response.status;
+          error.type = errorData.type;
+          error.retryAfter = errorData.retryAfter;
+          throw error;
+        }
+
+        const data = await response.json();
+
+        if (data.error) {
+          throw new Error(`API Error: ${data.error}`);
+        }
+
+        const newEntries = parseMultiplePersons(data.text);
+        logStatus(`Extracted ${newEntries.length} people from ${fileId}`);
+
+        return newEntries;
+      }
+
       // Improved retry logic with exponential backoff
       async function processImageFileWithRetry(file, db, batchInfo) {
         const fileId = `file-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
         const maxRetries = 3;
-
-        // Get the selected model
         const selectedModel = document.querySelector(
           'input[name="model"]:checked'
         ).value;
@@ -353,7 +658,9 @@
             const isRateLimit =
               error.message.includes("429") ||
               error.message.includes("rate limit") ||
-              error.status === 429;
+              error.message.includes("Rate limit") ||
+              error.status === 429 ||
+              error.type === "rate_limit_error";
             const isLastAttempt = attempt === maxRetries - 1;
 
             if (isRateLimit && !isLastAttempt) {
@@ -364,6 +671,11 @@
                   attempt + 1
                 }/${maxRetries}. Waiting ${delay / 1000}s...`
               );
+
+              // Show rate limit warning
+              document.getElementById("rateLimitWarning").style.display =
+                "block";
+
               await new Promise((resolve) => setTimeout(resolve, delay));
               continue;
             }
@@ -402,324 +714,23 @@
 
         return 0;
       }
-      // Debug logging function
-      function logStatus(message, isError = false) {
-        const statusText = document.getElementById("statusText");
-        const timestamp = new Date().toLocaleTimeString();
-        const logEntry = `[${timestamp}] ${
-          isError ? "❌ ERROR: " : "✓ "
-        } ${message}`;
-        statusText.innerHTML += logEntry + "\n";
-        statusText.scrollTop = statusText.scrollHeight;
-        console.log(logEntry);
 
-        // Show the log if it's an error
-        if (isError) {
-          document.getElementById("statusLog").style.display = "block";
-          document.getElementById("debugToggle").textContent =
-            "Hide Debug Console";
-        }
-      }
-
-      // Initialize IndexedDB
-      function initDB() {
-        return new Promise((resolve, reject) => {
-          if (!window.indexedDB) {
-            logStatus(
-              "Your browser doesn't support IndexedDB. Using local storage instead."
-            );
-            resolve(null);
-            return;
-          }
-
-          const request = indexedDB.open(DB_NAME, 2); // Increased version to add batch counter store
-
-          request.onerror = (event) => {
-            logStatus("IndexedDB error: " + event.target.error, true);
-            resolve(null);
-          };
-
-          request.onupgradeneeded = (event) => {
-            const db = event.target.result;
-            if (!db.objectStoreNames.contains(STORE_NAME)) {
-              db.createObjectStore(STORE_NAME, {
-                keyPath: "id",
-                autoIncrement: true,
-              });
-            }
-            // Add a new object store for batch counters
-            if (!db.objectStoreNames.contains(BATCH_COUNTER_STORE)) {
-              db.createObjectStore(BATCH_COUNTER_STORE, {
-                keyPath: "date",
-              });
-            }
-          };
-
-          request.onsuccess = (event) => {
-            logStatus("Database initialized successfully");
-            resolve(event.target.result);
-          };
-        });
-      }
-
-      // Generate batch name for current upload
-      async function generateBatchName(db) {
-        // Format current date as a readable format for display
-        const now = new Date();
-        const day = now.getDate().toString().padStart(2, "0");
-        const month = now.toLocaleString("en-US", { month: "short" });
-        const year = now.getFullYear();
-        const dateStr = `${day}${month}${year}`;
-
-        let batchNumber = 1;
-
-        try {
-          if (db) {
-            // Use IndexedDB to get and update counter
-            const transaction = db.transaction(
-              [BATCH_COUNTER_STORE],
-              "readwrite"
-            );
-            const store = transaction.objectStore(BATCH_COUNTER_STORE);
-
-            // Get current date's counter
-            const currentDate = now.toISOString().split("T")[0]; // YYYY-MM-DD
-            const request = store.get(currentDate);
-
-            await new Promise((resolve, reject) => {
-              request.onsuccess = (event) => {
-                const result = event.target.result;
-                if (result) {
-                  // Increment existing counter
-                  batchNumber = result.counter + 1;
-                  store.put({ date: currentDate, counter: batchNumber });
-                } else {
-                  // Create new counter for today
-                  store.add({ date: currentDate, counter: 1 });
-                }
-                resolve();
-              };
-
-              request.onerror = (event) => {
-                logStatus(
-                  "Error getting batch counter: " + event.target.error,
-                  true
-                );
-                reject(event.target.error);
-              };
-            });
-          } else {
-            // Use localStorage as fallback
-            const storedCounters = localStorage.getItem("batchCounters");
-            if (storedCounters) {
-              const counters = JSON.parse(storedCounters);
-              const today = now.toISOString().split("T")[0]; // YYYY-MM-DD
-              if (counters[today]) {
-                batchNumber = counters[today] + 1;
-              }
-              counters[today] = batchNumber;
-              localStorage.setItem("batchCounters", JSON.stringify(counters));
-            } else {
-              const counters = {};
-              const today = now.toISOString().split("T")[0]; // YYYY-MM-DD
-              counters[today] = 1;
-              localStorage.setItem("batchCounters", JSON.stringify(counters));
-            }
-          }
-        } catch (error) {
-          logStatus("Error generating batch name: " + error.message, true);
-        }
-
-        // Create a more readable batch name for the UI display (March 17, 2025 - 1)
-        const readableMonth = now.toLocaleString("en-US", { month: "long" });
-        const readableDateStr = `${readableMonth} ${day}, ${year} - ${batchNumber}`;
-
-        // Return both the file name format and the display format
-        return {
-          fileName: `${dateStr}-${batchNumber}`,
-          displayName: readableDateStr,
-        };
-      }
-
-      // Save entries to storage
-      async function saveEntries(db) {
-        if (db) {
-          // Use IndexedDB
-          const transaction = db.transaction([STORE_NAME], "readwrite");
-          const store = transaction.objectStore(STORE_NAME);
-
-          // Clear existing entries
-          store.clear();
-
-          // Add all current entries
-          entries.forEach((entry) => {
-            store.add(entry);
-          });
-          logStatus(`Saved ${entries.length} entries to IndexedDB`);
-        } else {
-          // Use localStorage as fallback
-          localStorage.setItem(
-            "screenshotAnalyzerEntries",
-            JSON.stringify(entries)
-          );
-          logStatus(`Saved ${entries.length} entries to localStorage`);
-        }
-      }
-
-      // Load entries from storage
-      async function loadEntries(db) {
-        return new Promise((resolve, reject) => {
-          if (db) {
-            // Use IndexedDB
-            const transaction = db.transaction([STORE_NAME], "readonly");
-            const store = transaction.objectStore(STORE_NAME);
-            const request = store.getAll();
-
-            request.onsuccess = () => {
-              logStatus(
-                `Loaded ${
-                  request.result ? request.result.length : 0
-                } entries from IndexedDB`
-              );
-              resolve(request.result || []);
-            };
-
-            request.onerror = (event) => {
-              logStatus("Error loading entries: " + event.target.error, true);
-              resolve([]);
-            };
-          } else {
-            // Use localStorage as fallback
-            const savedEntries = localStorage.getItem(
-              "screenshotAnalyzerEntries"
-            );
-            const parsed = savedEntries ? JSON.parse(savedEntries) : [];
-            logStatus(`Loaded ${parsed.length} entries from localStorage`);
-            resolve(parsed);
-          }
-        });
-      }
-
-      // Parse the AI response for multiple people
-      function parseMultiplePersons(text) {
-        logStatus("Parsing AI response");
-        // Split by double newlines to separate different people
-        const personBlocks = text.split(/\n\s*\n/);
-        logStatus(`Found ${personBlocks.length} person blocks in response`);
-
-        const results = personBlocks
-          .map((block) => {
-            // Parse individual person data
-            const result = block.split("\n").reduce((acc, line) => {
-              if (line.includes(": ")) {
-                const [key, value] = line.split(": ").map((s) => s.trim());
-                acc[key.toLowerCase()] = value;
-              }
-              return acc;
-            }, {});
-
-            // Add timestamp for sorting
-            return {
-              name: result.name || "N/A",
-              company: result.company || "N/A",
-              role: result.role || "N/A",
-              credentials: result.credentials || "N/A",
-              timestamp: new Date().toISOString(),
-            };
-          })
-          .filter(
-            (person) => person.name !== "N/A" || person.company !== "N/A"
-          );
-
-        logStatus(
-          `Successfully parsed ${results.length} people from the response`
-        );
-        return results;
-      }
-
-      // Update the table with entries
-      function updateTable() {
-        const tableBody = document.getElementById("tableBody");
-        tableBody.innerHTML = entries
-          .map(
-            (entry, index) => `
-    <tr id="entry-${index}">
-      <td>${entry.name}</td>
-      <td>${entry.company}</td>
-      <td>${entry.role}</td>
-      <td>${entry.credentials}</td>
-    </tr>
-  `
-          )
-          .join("");
-        logStatus(`Updated table with ${entries.length} entries`);
-      }
-
-      // Clean single attempt function
-      async function processImageFileOnce(
-        file,
-        fileId,
-        batchInfo,
-        selectedModel
-      ) {
-        // Convert image to base64
-        const base64 = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.readAsDataURL(file);
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = (error) => reject(error);
-        });
-
-        logStatus(`Sending API request for ${fileId}`);
-
-        // Call API
-        const response = await fetch("/.netlify/functions/analyze-image", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            imageBase64: base64,
-            filename: file.name,
-            selectedModel: selectedModel,
-          }),
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          const error = new Error(
-            `API Error: ${response.status} ${response.statusText} - ${errorText}`
-          );
-          error.status = response.status;
-          throw error;
-        }
-
-        const data = await response.json();
-
-        if (data.error) {
-          throw new Error(`API Error: ${data.error}`);
-        }
-
-        // Parse the response
-        const newEntries = parseMultiplePersons(data.text);
-        logStatus(`Extracted ${newEntries.length} people from ${fileId}`);
-
-        return newEntries;
-      }
-
-      // Updated processFiles function with smart scheduling
+      // Updated processFiles function with improved scheduling
       async function processFiles(files, db) {
         const fileArray = Array.from(files);
         const total = fileArray.length;
         const loading = document.getElementById("loading");
 
-        // Generate a batch name for this upload
+        // Show rate limit warning for multiple files
+        if (total > 1) {
+          document.getElementById("rateLimitWarning").style.display = "block";
+        }
+
         const batchInfo = await generateBatchName(db);
         logStatus(
           `Generated batch name: ${batchInfo.displayName} (file: ${batchInfo.fileName})`
         );
 
-        // Update the download button text to include the batch name
         document.getElementById(
           "downloadBtn"
         ).textContent = `Download CSV (${batchInfo.displayName})`;
@@ -730,7 +741,7 @@
         let completed = 0;
         let totalEntries = 0;
 
-        // Process all files concurrently, but with smart rate limiting
+        // Process all files with smart rate limiting
         const promises = fileArray.map(async (file, index) => {
           const entryCount = await scheduleRequest(() =>
             processImageFileWithRetry(file, db, batchInfo)
@@ -744,7 +755,6 @@
           return entryCount;
         });
 
-        // Wait for all files to complete
         const results = await Promise.all(promises);
         totalEntries = results.reduce((sum, count) => sum + count, 0);
 
@@ -753,25 +763,19 @@
           `Completed processing ${total} files, extracted ${totalEntries} entries for batch ${batchInfo.displayName}`
         );
 
-        // Store the current batch name
         window.currentBatchName = batchInfo.fileName;
         window.currentBatchDisplayName = batchInfo.displayName;
       }
 
       // Download entries as CSV
       function downloadCSV() {
-        // Get the current batch name or use a default
         const fileName =
           window.currentBatchName ||
           `export-${new Date().toISOString().slice(0, 10)}`;
-
-        // Use display name for the button
         const displayName =
           window.currentBatchDisplayName ||
           `Export ${new Date().toLocaleDateString()}`;
 
-        // Filter out placeholder and error entries
-        // If we have a current batch, only include entries from that batch
         const dataEntries = entries.filter(
           (entry) =>
             !entry.isPlaceholder &&
@@ -814,7 +818,6 @@
       }
 
       function resetFileInput() {
-        // Reset the file input value when changing models
         document.getElementById("fileInput").value = "";
         logStatus("Reset file input after model change");
       }
@@ -836,15 +839,13 @@
             entries = [];
             updateTable();
             await saveEntries(db);
-            // Reset the download button text
             document.getElementById("downloadBtn").textContent = "Download CSV";
-            // Clear the current batch name
+            document.getElementById("rateLimitWarning").style.display = "none";
             window.currentBatchName = null;
             window.currentBatchDisplayName = null;
             logStatus("Cleared all entries");
           });
 
-        // Toggle debug console
         document.getElementById("debugToggle").addEventListener("click", () => {
           const statusLog = document.getElementById("statusLog");
           const debugToggle = document.getElementById("debugToggle");
@@ -868,6 +869,7 @@
 
             await processFiles(files, db);
           });
+
         const modelRadios = document.querySelectorAll('input[name="model"]');
         modelRadios.forEach((radio) => {
           radio.addEventListener("change", () => {
@@ -875,6 +877,7 @@
             resetFileInput();
           });
         });
+
         logStatus("Application initialized successfully");
       }
 
