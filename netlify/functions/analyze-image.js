@@ -14,7 +14,7 @@ exports.handler = async function (event, context) {
     const body = JSON.parse(event.body);
     const imageBase64 = body.imageBase64;
     const filename = body.filename || "unknown";
-    const selectedModel = body.selectedModel || "gpt-4o"; // Default to gpt-4o if not specified
+    const selectedModel = body.selectedModel || "gpt-4o";
 
     if (!imageBase64) {
       return {
@@ -29,11 +29,11 @@ exports.handler = async function (event, context) {
 
     // Determine which API to use based on the selected model
     if (selectedModel === "gpt-4o") {
-      // OpenAI API call
+      // OpenAI API call with retry logic
       response = await axios.post(
         "https://api.openai.com/v1/chat/completions",
         {
-          model: "gpt-4o", // Consider using gpt-4o-mini for faster responses
+          model: "gpt-4o-mini", // Use gpt-4o-mini for higher rate limits and faster responses
           messages: [
             {
               role: "user",
@@ -50,14 +50,14 @@ exports.handler = async function (event, context) {
             },
           ],
           max_tokens: 1000,
-          temperature: 0.3, // Lower temperature for more consistent responses
+          temperature: 0.3,
         },
         {
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
           },
-          timeout: 9000, // 9 second timeout (giving buffer for Netlify's 10s limit)
+          timeout: 15000, // Increased timeout to 15 seconds
         }
       );
 
@@ -69,14 +69,14 @@ exports.handler = async function (event, context) {
         }),
       };
     } else {
-      // OpenRouter API call for other models
+      // OpenRouter API call
       const openRouterEndpoint =
         "https://openrouter.ai/api/v1/chat/completions";
 
       response = await axios.post(
         openRouterEndpoint,
         {
-          model: selectedModel, // Either "qwen/qwen-vl-plus" or "google/gemma-3-12b-it:free"
+          model: selectedModel,
           messages: [
             {
               role: "user",
@@ -98,10 +98,10 @@ exports.handler = async function (event, context) {
             "Content-Type": "application/json",
             Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
             "HTTP-Referer":
-              process.env.APP_URL || "https://screenshot-analyzer.netlify.app", // Required by OpenRouter
-            "X-Title": "Screenshot Analyzer", // Optional: app name
+              process.env.APP_URL || "https://screenshot-analyzer.netlify.app",
+            "X-Title": "Screenshot Analyzer",
           },
-          timeout: 9000,
+          timeout: 15000,
         }
       );
 
@@ -127,13 +127,26 @@ exports.handler = async function (event, context) {
       };
     }
 
-    // Handle OpenAI/OpenRouter API errors
+    // Handle API errors with specific rate limit handling
     if (error.response && error.response.data) {
       const statusCode = error.response.status;
       const errorMessage =
         error.response.data.error?.message || error.response.statusText;
 
       console.error(`API error (${statusCode}): ${errorMessage}`);
+
+      // Special handling for rate limit errors
+      if (statusCode === 429) {
+        const retryAfter = error.response.headers["retry-after"] || 60;
+        return {
+          statusCode: 429,
+          body: JSON.stringify({
+            error: `Rate limit exceeded. Please wait ${retryAfter} seconds before retrying.`,
+            type: "rate_limit_error",
+            retryAfter: retryAfter,
+          }),
+        };
+      }
 
       return {
         statusCode: statusCode,
