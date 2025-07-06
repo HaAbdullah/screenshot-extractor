@@ -26,6 +26,7 @@ exports.handler = async function (event, context) {
     console.log(`Processing file: ${filename} with model: ${selectedModel}`);
 
     let response;
+    let responseHeaders = {};
 
     // Determine which API to use based on the selected model
     if (selectedModel === "gpt-4o-mini" || selectedModel === "gpt-4o") {
@@ -60,15 +61,37 @@ exports.handler = async function (event, context) {
             "Content-Type": "application/json",
             Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
           },
-          timeout: 30000, // Increased timeout to 30 seconds
+          timeout: 30000, // 30 seconds timeout
         }
       );
 
+      // Extract rate limit headers from OpenAI response
+      if (response.headers) {
+        responseHeaders = {
+          "x-ratelimit-remaining-requests":
+            response.headers["x-ratelimit-remaining-requests"],
+          "x-ratelimit-remaining-tokens":
+            response.headers["x-ratelimit-remaining-tokens"],
+          "x-ratelimit-reset-requests":
+            response.headers["x-ratelimit-reset-requests"],
+          "x-ratelimit-reset-tokens":
+            response.headers["x-ratelimit-reset-tokens"],
+        };
+      }
+
       return {
         statusCode: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Expose-Headers":
+            "x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens",
+          ...responseHeaders,
+        },
         body: JSON.stringify({
           text: response.data.choices[0].message.content,
           filename: filename,
+          rateLimitInfo: responseHeaders,
         }),
       };
     } else {
@@ -108,11 +131,29 @@ exports.handler = async function (event, context) {
         }
       );
 
+      // Extract rate limit headers from OpenRouter response if available
+      if (response.headers) {
+        responseHeaders = {
+          "x-ratelimit-remaining-requests":
+            response.headers["x-ratelimit-remaining-requests"],
+          "x-ratelimit-reset-requests":
+            response.headers["x-ratelimit-reset-requests"],
+        };
+      }
+
       return {
         statusCode: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Expose-Headers":
+            "x-ratelimit-remaining-requests, x-ratelimit-reset-requests",
+          ...responseHeaders,
+        },
         body: JSON.stringify({
           text: response.data.choices[0].message.content,
           filename: filename,
+          rateLimitInfo: responseHeaders,
         }),
       };
     }
@@ -123,6 +164,10 @@ exports.handler = async function (event, context) {
     if (error.code === "ECONNABORTED") {
       return {
         statusCode: 504,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
         body: JSON.stringify({
           error: "Analysis timed out. Please try with a smaller image.",
           isTimeout: true,
@@ -159,6 +204,11 @@ exports.handler = async function (event, context) {
 
         return {
           statusCode: 429,
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Retry-After": retryAfter.toString(),
+          },
           body: JSON.stringify({
             error: `Rate limit exceeded (${rateLimitType}). ${errorMessage}`,
             type: "rate_limit_error",
@@ -172,6 +222,10 @@ exports.handler = async function (event, context) {
       // Handle other API errors
       return {
         statusCode: statusCode,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
         body: JSON.stringify({
           error: errorMessage,
           type: "api_error",
@@ -183,6 +237,10 @@ exports.handler = async function (event, context) {
     // Handle other errors
     return {
       statusCode: 500,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
       body: JSON.stringify({
         error: "Internal server error: " + error.message,
         type: "server_error",
