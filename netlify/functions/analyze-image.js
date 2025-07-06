@@ -14,7 +14,7 @@ exports.handler = async function (event, context) {
     const body = JSON.parse(event.body);
     const imageBase64 = body.imageBase64;
     const filename = body.filename || "unknown";
-    const selectedModel = body.selectedModel || "gpt-4o-mini"; // Updated default
+    const selectedModel = body.selectedModel || "gpt-4o-mini";
 
     if (!imageBase64) {
       return {
@@ -53,14 +53,14 @@ exports.handler = async function (event, context) {
             },
           ],
           max_tokens: 1000,
-          temperature: 0.3, // Lower temperature for more consistent responses
+          temperature: 0.3,
         },
         {
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
           },
-          timeout: 15000, // Increased timeout to 15 seconds
+          timeout: 30000, // Increased timeout to 30 seconds
         }
       );
 
@@ -79,7 +79,7 @@ exports.handler = async function (event, context) {
       response = await axios.post(
         openRouterEndpoint,
         {
-          model: selectedModel, // Either "qwen/qwen-vl-plus" or "google/gemma-3-12b-it:free"
+          model: selectedModel,
           messages: [
             {
               role: "user",
@@ -101,10 +101,10 @@ exports.handler = async function (event, context) {
             "Content-Type": "application/json",
             Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
             "HTTP-Referer":
-              process.env.APP_URL || "https://screenshot-analyzer.netlify.app", // Required by OpenRouter
-            "X-Title": "Screenshot Analyzer", // Optional: app name
+              process.env.APP_URL || "https://screenshot-analyzer.netlify.app",
+            "X-Title": "Screenshot Analyzer",
           },
-          timeout: 15000,
+          timeout: 30000,
         }
       );
 
@@ -130,32 +130,52 @@ exports.handler = async function (event, context) {
       };
     }
 
-    // Handle API errors with specific rate limit handling
+    // Handle API errors with enhanced rate limit handling
     if (error.response && error.response.data) {
       const statusCode = error.response.status;
+      const errorData = error.response.data;
       const errorMessage =
-        error.response.data.error?.message || error.response.statusText;
+        errorData.error?.message || error.response.statusText;
 
       console.error(`API error (${statusCode}): ${errorMessage}`);
+      console.error("Full error response:", JSON.stringify(errorData, null, 2));
 
-      // Special handling for rate limit errors
+      // Enhanced rate limit handling
       if (statusCode === 429) {
-        const retryAfter = error.response.headers["retry-after"] || 60;
+        const retryAfter =
+          error.response.headers["retry-after"] ||
+          error.response.headers["x-ratelimit-reset-requests"] ||
+          60;
+
+        // Check if it's a specific OpenAI rate limit type
+        let rateLimitType = "unknown";
+        if (errorMessage.includes("requests per minute")) {
+          rateLimitType = "requests_per_minute";
+        } else if (errorMessage.includes("tokens per minute")) {
+          rateLimitType = "tokens_per_minute";
+        } else if (errorMessage.includes("requests per day")) {
+          rateLimitType = "requests_per_day";
+        }
+
         return {
           statusCode: 429,
           body: JSON.stringify({
-            error: `Rate limit exceeded. Please wait ${retryAfter} seconds before retrying.`,
+            error: `Rate limit exceeded (${rateLimitType}). ${errorMessage}`,
             type: "rate_limit_error",
-            retryAfter: retryAfter,
+            retryAfter: parseInt(retryAfter),
+            rateLimitType: rateLimitType,
+            originalError: errorMessage,
           }),
         };
       }
 
+      // Handle other API errors
       return {
         statusCode: statusCode,
         body: JSON.stringify({
           error: errorMessage,
           type: "api_error",
+          originalError: errorData,
         }),
       };
     }
