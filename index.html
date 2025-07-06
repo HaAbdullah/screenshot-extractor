@@ -194,8 +194,8 @@
         <h3>Select AI Model</h3>
         <div class="model-options">
           <label>
-            <input type="radio" name="model" value="gpt-4o" checked />
-            <span>GPT-4o (OpenAI)</span>
+            <input type="radio" name="model" value="gpt-4o-mini" checked />
+            <span>GPT-4o Mini (OpenAI)</span>
           </label>
           <label>
             <input type="radio" name="model" value="qwen/qwen-vl-plus" />
@@ -238,11 +238,59 @@
     </div>
 
     <script>
-      // Modified script section with batch naming feature
+      // Modified script section with smart rate limiting
       let entries = [];
       const DB_NAME = "screenshotAnalyzerDB";
       const STORE_NAME = "entries";
       const BATCH_COUNTER_STORE = "batchCounters";
+
+      // Rate limiting state management
+      let lastRequestTime = 0;
+      let requestQueue = [];
+      let activeRequests = 0;
+      const MAX_CONCURRENT = 2; // Conservative but not too slow
+      const MIN_DELAY_BETWEEN_REQUESTS = 1000; // 1 second minimum
+
+      // Smart request scheduler
+      async function scheduleRequest(requestFn) {
+        return new Promise((resolve, reject) => {
+          requestQueue.push({ requestFn, resolve, reject });
+          processQueue();
+        });
+      }
+
+      async function processQueue() {
+        if (activeRequests >= MAX_CONCURRENT || requestQueue.length === 0) {
+          return;
+        }
+
+        const { requestFn, resolve, reject } = requestQueue.shift();
+        activeRequests++;
+
+        try {
+          // Calculate delay needed
+          const now = Date.now();
+          const timeSinceLastRequest = now - lastRequestTime;
+          const delayNeeded = Math.max(
+            0,
+            MIN_DELAY_BETWEEN_REQUESTS - timeSinceLastRequest
+          );
+
+          if (delayNeeded > 0) {
+            await new Promise((r) => setTimeout(r, delayNeeded));
+          }
+
+          lastRequestTime = Date.now();
+          const result = await requestFn();
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        } finally {
+          activeRequests--;
+          // Process next item in queue
+          setTimeout(processQueue, 100);
+        }
+      }
 
       // Debug logging function
       function logStatus(message, isError = false) {
@@ -485,74 +533,74 @@
         tableBody.innerHTML = entries
           .map(
             (entry, index) => `
-  <tr id="entry-${index}">
-    <td>${entry.name}</td>
-    <td>${entry.company}</td>
-    <td>${entry.role}</td>
-    <td>${entry.credentials}</td>
-  </tr>
-`
+    <tr id="entry-${index}">
+      <td>${entry.name}</td>
+      <td>${entry.company}</td>
+      <td>${entry.role}</td>
+      <td>${entry.credentials}</td>
+    </tr>
+  `
           )
           .join("");
         logStatus(`Updated table with ${entries.length} entries`);
       }
-      // 1. REDUCE CONCURRENCY - Update the processFiles function
-      async function processFiles(files, db) {
-        const concurrencyLimit = 1; // Changed from 3 to 1 - process one at a time
-        const fileArray = Array.from(files);
-        const total = fileArray.length;
-        const loading = document.getElementById("loading");
 
-        // Generate a batch name for this upload
-        const batchInfo = await generateBatchName(db);
-        logStatus(
-          `Generated batch name: ${batchInfo.displayName} (file: ${batchInfo.fileName})`
-        );
+      // Clean single attempt function
+      async function processImageFileOnce(
+        file,
+        fileId,
+        batchInfo,
+        selectedModel
+      ) {
+        // Convert image to base64
+        const base64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.readAsDataURL(file);
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = (error) => reject(error);
+        });
 
-        // Update the download button text to include the batch name
-        document.getElementById(
-          "downloadBtn"
-        ).textContent = `Download CSV (${batchInfo.displayName})`;
+        logStatus(`Sending API request for ${fileId}`);
 
-        loading.textContent = `Analyzing 0/${total} files...`;
-        loading.style.display = "block";
+        // Call API
+        const response = await fetch("/.netlify/functions/analyze-image", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            imageBase64: base64,
+            filename: file.name,
+            selectedModel: selectedModel,
+          }),
+        });
 
-        let completed = 0;
-        let totalEntries = 0;
-
-        // Process files ONE AT A TIME with delay between requests
-        for (let i = 0; i < fileArray.length; i++) {
-          const file = fileArray[i];
-
-          // Add delay between requests (except for the first one)
-          if (i > 0) {
-            await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 second delay
-          }
-
-          const entryCount = await processImageFile(file, db, batchInfo);
-
-          completed += 1;
-          totalEntries += entryCount;
-          loading.textContent = `Analyzing ${completed}/${total} files...`;
-
-          logStatus(`Processed ${completed}/${total} files`);
+        if (!response.ok) {
+          const errorText = await response.text();
+          const error = new Error(
+            `API Error: ${response.status} ${response.statusText} - ${errorText}`
+          );
+          error.status = response.status;
+          throw error;
         }
 
-        loading.style.display = "none";
-        logStatus(
-          `Completed processing ${completed} files, extracted ${totalEntries} entries for batch ${batchInfo.displayName}`
-        );
+        const data = await response.json();
 
-        // Store the current batch name
-        window.currentBatchName = batchInfo.fileName;
-        window.currentBatchDisplayName = batchInfo.displayName;
+        if (data.error) {
+          throw new Error(`API Error: ${data.error}`);
+        }
+
+        // Parse the response
+        const newEntries = parseMultiplePersons(data.text);
+        logStatus(`Extracted ${newEntries.length} people from ${fileId}`);
+
+        return newEntries;
       }
 
-      // 2. ADD RETRY LOGIC - Update the processImageFile function
-      async function processImageFile(file, db, batchInfo) {
+      // Improved retry logic with better backoff strategy
+      async function processImageFileWithRetry(file, db, batchInfo) {
         const fileId = `file-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
         const maxRetries = 3;
-        let retryCount = 0;
 
         // Get the selected model
         const selectedModel = document.querySelector(
@@ -579,132 +627,64 @@
         entries.push(placeholderEntry);
         updateTable();
 
-        // Retry logic wrapper
-        while (retryCount < maxRetries) {
+        // Retry with exponential backoff
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
           try {
-            // Convert image to base64
-            const base64 = await new Promise((resolve, reject) => {
-              const reader = new FileReader();
-              reader.readAsDataURL(file);
-              reader.onload = () => resolve(reader.result);
-              reader.onerror = (error) => reject(error);
-            });
-
-            logStatus(`Image ${fileId} converted to base64`);
-            logStatus(
-              `Sending request to serverless function for ${fileId} (attempt ${
-                retryCount + 1
-              }/${maxRetries})`
+            const result = await processImageFileOnce(
+              file,
+              fileId,
+              batchInfo,
+              selectedModel
             );
 
-            // Call your Netlify Function
-            const response = await fetch("/.netlify/functions/analyze-image", {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                imageBase64: base64,
-                filename: file.name,
-                selectedModel: selectedModel,
-              }),
-            });
-
-            logStatus(`API response status for ${fileId}: ${response.status}`);
-
-            if (!response.ok) {
-              const errorText = await response.text();
-              logStatus(`API Error Response for ${fileId}: ${errorText}`, true);
-
-              // Check if it's a rate limit error
-              if (response.status === 429) {
-                retryCount++;
-                if (retryCount < maxRetries) {
-                  const waitTime = Math.pow(2, retryCount) * 1000; // Exponential backoff: 2s, 4s, 8s
-                  logStatus(
-                    `Rate limit hit for ${fileId}. Waiting ${
-                      waitTime / 1000
-                    }s before retry ${retryCount + 1}/${maxRetries}`
-                  );
-                  await new Promise((resolve) => setTimeout(resolve, waitTime));
-                  continue; // Try again
-                }
-              }
-
-              throw new Error(
-                `Server Error: ${response.status} ${response.statusText}`
-              );
-            }
-
-            const data = await response.json();
-            logStatus(`Successfully received API response for ${fileId}`);
-
-            if (data.error) {
-              throw new Error(`API Error: ${data.error}`);
-            }
-
-            const analysis = data.text;
-            logStatus(
-              `Received analysis text for ${fileId}: ${analysis.substring(
-                0,
-                50
-              )}...`
-            );
-
-            // Parse multiple people from the response
-            const newEntries = parseMultiplePersons(analysis);
-            logStatus(`Extracted ${newEntries.length} people from ${fileId}`);
-
-            // Remove the placeholder
+            // Success! Remove placeholder and add results
             entries = entries.filter((entry) => entry.fileId !== fileId);
 
-            // Add the new entries with batch name information
-            newEntries.forEach((entry) => {
+            result.forEach((entry) => {
               entry.batchName = batchInfo.fileName;
               entry.batchDisplayName = batchInfo.displayName;
             });
 
-            entries = [...entries, ...newEntries];
-
-            // Update table and save to storage
+            entries = [...entries, ...result];
             updateTable();
             await saveEntries(db);
 
-            return newEntries.length;
+            return result.length;
           } catch (error) {
-            // Check if this is a rate limit error and we have retries left
-            if (error.message.includes("429") && retryCount < maxRetries - 1) {
-              retryCount++;
-              const waitTime = Math.pow(2, retryCount) * 1000; // Exponential backoff
+            const isRateLimit =
+              error.message.includes("429") || error.status === 429;
+            const isLastAttempt = attempt === maxRetries - 1;
+
+            if (isRateLimit && !isLastAttempt) {
+              // Exponential backoff for rate limits: 2s, 4s, 8s
+              const delay = Math.pow(2, attempt + 1) * 1000;
               logStatus(
-                `Rate limit error for ${fileId}. Waiting ${
-                  waitTime / 1000
-                }s before retry ${retryCount + 1}/${maxRetries}`
+                `Rate limit for ${file.name}, attempt ${
+                  attempt + 1
+                }/${maxRetries}. Waiting ${delay / 1000}s...`
               );
-              await new Promise((resolve) => setTimeout(resolve, waitTime));
-              continue; // Try again
+              await new Promise((resolve) => setTimeout(resolve, delay));
+              continue;
             }
 
-            // If we've exhausted retries or it's a different error
+            // Failed permanently
             logStatus(
-              `Error processing file ${file.name} (${fileId}) after ${
-                retryCount + 1
-              } attempts: ${error.message}`,
+              `Failed to process ${file.name} after ${attempt + 1} attempts: ${
+                error.message
+              }`,
               true
             );
 
-            // Remove the placeholder entry
+            // Remove placeholder and add error entry
             entries = entries.filter((entry) => entry.fileId !== fileId);
-            updateTable();
 
-            // Add an error entry
             const errorEntry = {
               name: `Failed: ${file.name}`,
               company: "Error",
               role:
                 error.message.substring(0, 30) +
                 (error.message.length > 30 ? "..." : ""),
-              credentials: `Attempts: ${retryCount + 1}`,
+              credentials: `${attempt + 1} attempts`,
               timestamp: new Date().toISOString(),
               isError: true,
               batchName: batchInfo.fileName,
@@ -718,7 +698,61 @@
             return 0;
           }
         }
+
+        return 0;
       }
+
+      // Updated processFiles function with smart scheduling
+      async function processFiles(files, db) {
+        const fileArray = Array.from(files);
+        const total = fileArray.length;
+        const loading = document.getElementById("loading");
+
+        // Generate a batch name for this upload
+        const batchInfo = await generateBatchName(db);
+        logStatus(
+          `Generated batch name: ${batchInfo.displayName} (file: ${batchInfo.fileName})`
+        );
+
+        // Update the download button text to include the batch name
+        document.getElementById(
+          "downloadBtn"
+        ).textContent = `Download CSV (${batchInfo.displayName})`;
+
+        loading.textContent = `Analyzing 0/${total} files...`;
+        loading.style.display = "block";
+
+        let completed = 0;
+        let totalEntries = 0;
+
+        // Process all files concurrently, but with smart rate limiting
+        const promises = fileArray.map(async (file, index) => {
+          const entryCount = await scheduleRequest(() =>
+            processImageFileWithRetry(file, db, batchInfo)
+          );
+
+          completed++;
+          totalEntries += entryCount;
+          loading.textContent = `Analyzing ${completed}/${total} files...`;
+          logStatus(`Completed ${completed}/${total} files`);
+
+          return entryCount;
+        });
+
+        // Wait for all files to complete
+        const results = await Promise.all(promises);
+        totalEntries = results.reduce((sum, count) => sum + count, 0);
+
+        loading.style.display = "none";
+        logStatus(
+          `Completed processing ${total} files, extracted ${totalEntries} entries for batch ${batchInfo.displayName}`
+        );
+
+        // Store the current batch name
+        window.currentBatchName = batchInfo.fileName;
+        window.currentBatchDisplayName = batchInfo.displayName;
+      }
+
       // Download entries as CSV
       function downloadCSV() {
         // Get the current batch name or use a default

@@ -14,7 +14,7 @@ exports.handler = async function (event, context) {
     const body = JSON.parse(event.body);
     const imageBase64 = body.imageBase64;
     const filename = body.filename || "unknown";
-    const selectedModel = body.selectedModel || "gpt-4o";
+    const selectedModel = body.selectedModel || "gpt-4o-mini"; // Updated default
 
     if (!imageBase64) {
       return {
@@ -28,12 +28,15 @@ exports.handler = async function (event, context) {
     let response;
 
     // Determine which API to use based on the selected model
-    if (selectedModel === "gpt-4o") {
-      // OpenAI API call with retry logic
+    if (selectedModel === "gpt-4o-mini" || selectedModel === "gpt-4o") {
+      // OpenAI API call - use gpt-4o-mini for better rate limits
+      const modelToUse =
+        selectedModel === "gpt-4o" ? "gpt-4o-mini" : selectedModel;
+
       response = await axios.post(
         "https://api.openai.com/v1/chat/completions",
         {
-          model: "gpt-4o-mini", // Use gpt-4o-mini for higher rate limits and faster responses
+          model: modelToUse,
           messages: [
             {
               role: "user",
@@ -50,7 +53,7 @@ exports.handler = async function (event, context) {
             },
           ],
           max_tokens: 1000,
-          temperature: 0.3,
+          temperature: 0.3, // Lower temperature for more consistent responses
         },
         {
           headers: {
@@ -69,14 +72,14 @@ exports.handler = async function (event, context) {
         }),
       };
     } else {
-      // OpenRouter API call
+      // OpenRouter API call for other models
       const openRouterEndpoint =
         "https://openrouter.ai/api/v1/chat/completions";
 
       response = await axios.post(
         openRouterEndpoint,
         {
-          model: selectedModel,
+          model: selectedModel, // Either "qwen/qwen-vl-plus" or "google/gemma-3-12b-it:free"
           messages: [
             {
               role: "user",
@@ -98,8 +101,8 @@ exports.handler = async function (event, context) {
             "Content-Type": "application/json",
             Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
             "HTTP-Referer":
-              process.env.APP_URL || "https://screenshot-analyzer.netlify.app",
-            "X-Title": "Screenshot Analyzer",
+              process.env.APP_URL || "https://screenshot-analyzer.netlify.app", // Required by OpenRouter
+            "X-Title": "Screenshot Analyzer", // Optional: app name
           },
           timeout: 15000,
         }
