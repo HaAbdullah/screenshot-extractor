@@ -180,24 +180,25 @@
       }
 
       .rate-limit-info {
-        background: #e3f2fd;
-        border: 1px solid #bbdefb;
+        background: #e7f3ff;
+        border: 1px solid #b3d9ff;
         border-radius: 6px;
         padding: 1rem;
         margin-bottom: 1rem;
         font-size: 0.9rem;
-        color: #1565c0;
       }
     </style>
   </head>
   <body>
     <div class="container">
-      <h1>Screenshot Analyzer - Optimized</h1>
+      <h1>Screenshot Analyzer</h1>
 
       <div class="rate-limit-info">
-        <strong>Faster Than Original:</strong> 2x concurrent requests + 2-second
-        delays (vs your original 3-second delays) = 2-3x faster processing while
-        staying safe from rate limits.
+        <strong>Rate Limit Status:</strong>
+        <span id="rateLimitStatus">Ready</span> |
+        <strong>Requests this minute:</strong>
+        <span id="requestCount">0</span>/20 |
+        <strong>Next window reset:</strong> <span id="nextReset">--</span>
       </div>
 
       <div class="upload-section">
@@ -211,7 +212,7 @@
         <div class="model-options">
           <label>
             <input type="radio" name="model" value="gpt-4o-mini" checked />
-            <span>GPT-4o Mini (OpenAI) - Recommended</span>
+            <span>GPT-4o Mini (OpenAI)</span>
           </label>
           <label>
             <input type="radio" name="model" value="qwen/qwen-vl-plus" />
@@ -254,88 +255,75 @@
     </div>
 
     <script>
-      // Optimized rate limiting system
+      // Modified script section with smarter rate limiting
       let entries = [];
       const DB_NAME = "screenshotAnalyzerDB";
       const STORE_NAME = "entries";
       const BATCH_COUNTER_STORE = "batchCounters";
 
-      // Optimized but safe rate limiting - faster than the original 3-second delays
-      const RATE_LIMIT_CONFIG = {
-        "gpt-4o-mini": {
-          maxConcurrent: 2, // 2 concurrent = 2x faster than original
-          baseDelay: 2000, // 2 seconds vs original 3 seconds
-          burstLimit: 3, // Allow 3 quick requests
-          burstWindow: 90000, // 1.5 minute window
-          minDelayAfterError: 8000, // 8 seconds after error
-        },
-        "gpt-4o": {
-          maxConcurrent: 1,
-          baseDelay: 2500, // Still faster than original 3s
-          burstLimit: 2,
-          burstWindow: 90000,
-          minDelayAfterError: 10000,
-        },
-        default: {
-          // For OpenRouter models
-          maxConcurrent: 1,
-          baseDelay: 2500, // Faster than original 3s
-          burstLimit: 2,
-          burstWindow: 90000,
-          minDelayAfterError: 10000,
-        },
+      // Smart rate limiting based on OpenAI's actual limits
+      let requestsThisMinute = 0;
+      let currentMinuteStart = Date.now();
+      let lastRequestTime = 0;
+      let requestQueue = [];
+      let activeRequests = 0;
+
+      // Conservative but more realistic limits for gpt-4o-mini
+      const OPENAI_LIMITS = {
+        requestsPerMinute: 20, // Conservative - actual tier 1 limit is 500-3000
+        minDelayBetweenRequests: 800, // 0.8 seconds minimum
+        maxConcurrent: 2, // Allow 2 concurrent for better speed
       };
 
-      // Rate limiting state
-      let activeRequests = 0;
-      let requestQueue = [];
-      let lastRequestTime = 0;
-      let burstCount = 0;
-      let burstWindowStart = 0;
-      let consecutiveErrors = 0;
-      let adaptiveDelayMultiplier = 1;
+      const OPENROUTER_LIMITS = {
+        requestsPerMinute: 10, // More conservative for OpenRouter
+        minDelayBetweenRequests: 1500, // 1.5 seconds
+        maxConcurrent: 1,
+      };
 
-      // Get current rate limit config based on selected model
-      function getCurrentConfig() {
+      function getCurrentLimits() {
         const selectedModel = document.querySelector(
           'input[name="model"]:checked'
         ).value;
-        return RATE_LIMIT_CONFIG[selectedModel] || RATE_LIMIT_CONFIG["default"];
+        return selectedModel === "gpt-4o-mini"
+          ? OPENAI_LIMITS
+          : OPENROUTER_LIMITS;
       }
 
-      // Faster delay calculation - beat the original 3-second delays
-      function calculateDelay() {
-        const config = getCurrentConfig();
+      function updateRateLimitDisplay() {
         const now = Date.now();
+        const minuteElapsed = now - currentMinuteStart;
 
-        // If we've had recent errors, be more careful but not excessive
-        if (consecutiveErrors > 0) {
-          const errorDelay = config.minDelayAfterError;
-          logStatus(`Error-based delay: ${errorDelay / 1000}s`);
-          return errorDelay;
+        if (minuteElapsed >= 60000) {
+          // Reset minute counter
+          requestsThisMinute = 0;
+          currentMinuteStart = now;
         }
 
-        // Reset burst counter if window expired
-        if (now - burstWindowStart > config.burstWindow) {
-          burstCount = 0;
-          burstWindowStart = now;
+        document.getElementById("requestCount").textContent =
+          requestsThisMinute;
+
+        const nextReset = new Date(currentMinuteStart + 60000);
+        document.getElementById("nextReset").textContent =
+          nextReset.toLocaleTimeString();
+
+        const limits = getCurrentLimits();
+        const remaining = limits.requestsPerMinute - requestsThisMinute;
+
+        if (remaining <= 0) {
+          document.getElementById("rateLimitStatus").textContent =
+            "Rate Limited - Waiting";
+          document.getElementById("rateLimitStatus").style.color = "#dc3545";
+        } else if (remaining <= 3) {
+          document.getElementById("rateLimitStatus").textContent = "Near Limit";
+          document.getElementById("rateLimitStatus").style.color = "#ffc107";
+        } else {
+          document.getElementById("rateLimitStatus").textContent = "Ready";
+          document.getElementById("rateLimitStatus").style.color = "#28a745";
         }
-
-        // Burst requests get minimal delay - much faster than original
-        if (burstCount < config.burstLimit) {
-          const burstDelay = 1000; // Just 1 second for burst (vs original 3s)
-          return burstDelay;
-        }
-
-        // Regular delay - still faster than original 3 seconds
-        const baseDelay = config.baseDelay * adaptiveDelayMultiplier;
-        const timeSinceLastRequest = now - lastRequestTime;
-        const calculatedDelay = Math.max(0, baseDelay - timeSinceLastRequest);
-
-        return calculatedDelay;
       }
 
-      // Enhanced request scheduler
+      // Smart request scheduler
       async function scheduleRequest(requestFn) {
         return new Promise((resolve, reject) => {
           requestQueue.push({ requestFn, resolve, reject });
@@ -344,95 +332,79 @@
       }
 
       async function processQueue() {
-        const config = getCurrentConfig();
+        const limits = getCurrentLimits();
 
         if (
-          activeRequests >= config.maxConcurrent ||
+          activeRequests >= limits.maxConcurrent ||
           requestQueue.length === 0
         ) {
           return;
         }
 
+        const now = Date.now();
+        const minuteElapsed = now - currentMinuteStart;
+
+        // Reset minute counter if needed
+        if (minuteElapsed >= 60000) {
+          requestsThisMinute = 0;
+          currentMinuteStart = now;
+          logStatus("Rate limit window reset");
+        }
+
+        // Check if we've hit the per-minute limit
+        if (requestsThisMinute >= limits.requestsPerMinute) {
+          const timeUntilReset = 60000 - minuteElapsed;
+          logStatus(
+            `Rate limit reached. Waiting ${Math.ceil(
+              timeUntilReset / 1000
+            )}s for reset...`
+          );
+          setTimeout(processQueue, timeUntilReset + 100);
+          updateRateLimitDisplay();
+          return;
+        }
+
+        // Check minimum delay between requests
+        const timeSinceLastRequest = now - lastRequestTime;
+        if (timeSinceLastRequest < limits.minDelayBetweenRequests) {
+          const delayNeeded =
+            limits.minDelayBetweenRequests - timeSinceLastRequest;
+          logStatus(`Waiting ${delayNeeded}ms before next request...`);
+          setTimeout(processQueue, delayNeeded);
+          return;
+        }
+
+        // Process the request
         const { requestFn, resolve, reject } = requestQueue.shift();
         activeRequests++;
+        requestsThisMinute++;
+        lastRequestTime = Date.now();
+
+        updateRateLimitDisplay();
 
         try {
-          const delay = calculateDelay();
-
-          if (delay > 0) {
-            logStatus(
-              `Smart delay: ${delay}ms (${activeRequests} active, ${requestQueue.length} queued)`
-            );
-            await new Promise((r) => setTimeout(r, delay));
-          }
-
-          lastRequestTime = Date.now();
-          burstCount++;
-
           const result = await requestFn();
-
-          // Success - gradually reduce adaptive delay and reset error count
-          consecutiveErrors = 0;
-          if (adaptiveDelayMultiplier > 1) {
-            adaptiveDelayMultiplier = Math.max(
-              1,
-              adaptiveDelayMultiplier * 0.8
-            );
-            logStatus(
-              `Success! Reduced delay multiplier to ${adaptiveDelayMultiplier}x`
-            );
-          }
-
           resolve(result);
         } catch (error) {
-          // Handle errors with aggressive backoff
-          consecutiveErrors++;
-
-          if (
-            error.message.includes("429") ||
-            error.message.includes("rate limit")
-          ) {
-            // Much more aggressive rate limit response
-            adaptiveDelayMultiplier = Math.min(
-              8,
-              adaptiveDelayMultiplier * 2.5
-            );
-            logStatus(
-              `🚨 RATE LIMIT! Increased delay multiplier to ${adaptiveDelayMultiplier}x. Consecutive errors: ${consecutiveErrors}`,
-              true
-            );
-
-            // Reset burst counter to prevent further fast requests
-            burstCount = config.burstLimit;
-          } else {
-            // For other errors, moderate increase
-            adaptiveDelayMultiplier = Math.min(
-              4,
-              adaptiveDelayMultiplier * 1.3
-            );
-            logStatus(
-              `Error detected. Delay multiplier: ${adaptiveDelayMultiplier}x`,
-              true
-            );
-          }
-
           reject(error);
         } finally {
           activeRequests--;
-          // Much longer delay before processing next request after any request
-          setTimeout(processQueue, 500);
+          // Process next item with a small delay
+          setTimeout(processQueue, 200);
         }
       }
 
-      // Improved retry logic with smarter backoff
+      // Enhanced retry logic with better backoff for rate limits
       async function processImageFileWithRetry(file, db, batchInfo) {
         const fileId = `file-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        const maxRetries = 3;
+        const maxRetries = 4; // Increased retries
+
         const selectedModel = document.querySelector(
           'input[name="model"]:checked'
         ).value;
-
-        logStatus(`Processing ${file.name} with ${selectedModel}`);
+        logStatus(
+          `Processing file: ${file.name} (ID: ${fileId}, Model: ${selectedModel})`
+        );
 
         // Add placeholder
         const placeholderEntry = {
@@ -450,7 +422,7 @@
         entries.push(placeholderEntry);
         updateTable();
 
-        // Smart retry with exponential backoff
+        // Retry with smart backoff
         for (let attempt = 0; attempt < maxRetries; attempt++) {
           try {
             const result = await processImageFileOnce(
@@ -462,6 +434,7 @@
 
             // Success! Remove placeholder and add results
             entries = entries.filter((entry) => entry.fileId !== fileId);
+
             result.forEach((entry) => {
               entry.batchName = batchInfo.fileName;
               entry.batchDisplayName = batchInfo.displayName;
@@ -475,32 +448,49 @@
           } catch (error) {
             const isRateLimit =
               error.message.includes("429") ||
-              error.message.includes("rate limit");
+              error.message.includes("rate limit") ||
+              error.status === 429;
             const isLastAttempt = attempt === maxRetries - 1;
 
             if (isRateLimit && !isLastAttempt) {
-              // Moderate backoff - still faster recovery than ultra-conservative
-              const delays = [5000, 15000, 30000]; // 5s, 15s, 30s
-              const delay = delays[attempt] || 45000;
+              // Smart backoff for rate limits
+              let delay;
+              if (selectedModel === "gpt-4o-mini") {
+                // For OpenAI, wait for the next minute window + some buffer
+                const timeUntilReset =
+                  60000 - (Date.now() - currentMinuteStart);
+                delay = Math.max(timeUntilReset + 5000, 10000); // At least 10 seconds
+                logStatus(
+                  `OpenAI rate limit. Waiting ${Math.ceil(
+                    delay / 1000
+                  )}s for next window...`
+                );
 
-              logStatus(
-                `Rate limit on ${file.name}. Waiting ${
-                  delay / 1000
-                }s before retry ${attempt + 2}/${maxRetries}...`
-              );
+                // Reset our counter since we hit a rate limit
+                requestsThisMinute = OPENAI_LIMITS.requestsPerMinute;
+              } else {
+                // For OpenRouter, use exponential backoff
+                delay = Math.min(20000, 5000 * Math.pow(2, attempt));
+                logStatus(
+                  `OpenRouter rate limit. Backing off ${delay / 1000}s...`
+                );
+              }
+
               await new Promise((resolve) => setTimeout(resolve, delay));
               continue;
             }
 
             // Failed permanently
             logStatus(
-              `Failed ${file.name} after ${attempt + 1} attempts: ${
+              `Failed to process ${file.name} after ${attempt + 1} attempts: ${
                 error.message
               }`,
               true
             );
 
+            // Remove placeholder and add error entry
             entries = entries.filter((entry) => entry.fileId !== fileId);
+
             const errorEntry = {
               name: `Failed: ${file.name}`,
               company: "Error",
@@ -517,6 +507,7 @@
             entries.push(errorEntry);
             updateTable();
             await saveEntries(db);
+
             return 0;
           }
         }
@@ -535,6 +526,7 @@
         statusText.scrollTop = statusText.scrollHeight;
         console.log(logEntry);
 
+        // Show the log if it's an error
         if (isError) {
           document.getElementById("statusLog").style.display = "block";
           document.getElementById("debugToggle").textContent =
@@ -599,6 +591,7 @@
               "readwrite"
             );
             const store = transaction.objectStore(BATCH_COUNTER_STORE);
+
             const currentDate = now.toISOString().split("T")[0];
             const request = store.get(currentDate);
 
@@ -657,7 +650,9 @@
         if (db) {
           const transaction = db.transaction([STORE_NAME], "readwrite");
           const store = transaction.objectStore(STORE_NAME);
+
           store.clear();
+
           entries.forEach((entry) => {
             store.add(entry);
           });
@@ -755,13 +750,14 @@
         logStatus(`Updated table with ${entries.length} entries`);
       }
 
-      // Process single image file
+      // Clean single attempt function
       async function processImageFileOnce(
         file,
         fileId,
         batchInfo,
         selectedModel
       ) {
+        // Convert image to base64
         const base64 = await new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.readAsDataURL(file);
@@ -771,6 +767,7 @@
 
         logStatus(`Sending API request for ${fileId}`);
 
+        // Call API
         const response = await fetch("/.netlify/functions/analyze-image", {
           method: "POST",
           headers: {
@@ -798,13 +795,14 @@
           throw new Error(`API Error: ${data.error}`);
         }
 
+        // Parse the response
         const newEntries = parseMultiplePersons(data.text);
         logStatus(`Extracted ${newEntries.length} people from ${fileId}`);
 
         return newEntries;
       }
 
-      // Optimized batch processing
+      // Updated processFiles function with smart scheduling
       async function processFiles(files, db) {
         const fileArray = Array.from(files);
         const total = fileArray.length;
@@ -812,34 +810,20 @@
 
         const batchInfo = await generateBatchName(db);
         logStatus(
-          `Starting optimized batch: ${batchInfo.displayName} (${total} files)`
+          `Generated batch name: ${batchInfo.displayName} (file: ${batchInfo.fileName})`
         );
 
         document.getElementById(
           "downloadBtn"
         ).textContent = `Download CSV (${batchInfo.displayName})`;
 
-        loading.textContent = `Processing 0/${total} files...`;
+        loading.textContent = `Analyzing 0/${total} files...`;
         loading.style.display = "block";
 
         let completed = 0;
         let totalEntries = 0;
 
-        // Reset rate limiting state for new batch - but keep it conservative
-        burstCount = 0;
-        burstWindowStart = Date.now();
-        // Don't reset consecutiveErrors or adaptiveDelayMultiplier - keep learning from previous errors
-
-        logStatus(
-          `🔧 Starting ultra-safe batch processing: ${batchInfo.displayName}`
-        );
-        logStatus(
-          `Current settings: ${getCurrentConfig().maxConcurrent} concurrent, ${
-            getCurrentConfig().baseDelay / 1000
-          }s base delay, ${adaptiveDelayMultiplier}x multiplier`
-        );
-
-        // Process files with smart concurrency
+        // Process all files with smart rate limiting
         const promises = fileArray.map(async (file, index) => {
           const entryCount = await scheduleRequest(() =>
             processImageFileWithRetry(file, db, batchInfo)
@@ -847,10 +831,8 @@
 
           completed++;
           totalEntries += entryCount;
-          loading.textContent = `Processing ${completed}/${total} files... (${totalEntries} entries found)`;
-          logStatus(
-            `Completed ${completed}/${total} files (${totalEntries} total entries)`
-          );
+          loading.textContent = `Analyzing ${completed}/${total} files...`;
+          logStatus(`Completed ${completed}/${total} files`);
 
           return entryCount;
         });
@@ -860,7 +842,7 @@
 
         loading.style.display = "none";
         logStatus(
-          `🎉 Batch complete! Processed ${total} files, extracted ${totalEntries} entries`
+          `Completed processing ${total} files, extracted ${totalEntries} entries for batch ${batchInfo.displayName}`
         );
 
         window.currentBatchName = batchInfo.fileName;
@@ -913,7 +895,7 @@
         link.click();
         document.body.removeChild(link);
         logStatus(
-          `Downloaded CSV: ${fileName}.csv with ${dataEntries.length} entries`
+          `Downloaded CSV file: ${fileName}.csv with ${dataEntries.length} entries`
         );
       }
 
@@ -924,10 +906,14 @@
 
       // Initialize the application
       async function init() {
-        logStatus("Initializing optimized screenshot analyzer");
+        logStatus("Initializing application");
         const db = await initDB();
         entries = await loadEntries(db);
         updateTable();
+
+        // Initialize rate limit display
+        updateRateLimitDisplay();
+        setInterval(updateRateLimitDisplay, 1000); // Update every second
 
         document
           .getElementById("downloadBtn")
@@ -974,20 +960,14 @@
           radio.addEventListener("change", () => {
             logStatus(`Model changed to: ${radio.value}`);
             resetFileInput();
-            // Reset rate limiting state when model changes
-            adaptiveDelayMultiplier = 1;
-            consecutiveErrors = 0;
+            updateRateLimitDisplay(); // Update display for new model limits
           });
         });
 
-        logStatus(
-          `✅ Application ready - ULTRA-SAFE mode to prevent 429 errors!`
-        );
-        logStatus(
-          `⚠️  This version prioritizes zero rate limits over speed. Each image will wait 4+ seconds.`
-        );
+        logStatus("Application initialized successfully");
       }
 
+      // Start the app when page loads
       window.addEventListener("DOMContentLoaded", init);
     </script>
   </body>
