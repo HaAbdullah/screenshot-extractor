@@ -213,7 +213,16 @@
         <h3>Select AI Model</h3>
         <div class="model-options">
           <label>
-            <input type="radio" name="model" value="gpt-4.1-nano" checked />
+            <input
+              type="radio"
+              name="model"
+              value="claude-3.5-sonnet"
+              checked
+            />
+            <span>Claude 3.5 Sonnet (Best Vision & Rate Limits) 🏆</span>
+          </label>
+          <label>
+            <input type="radio" name="model" value="gpt-4.1-nano" />
             <span>GPT-4.1 Nano (Fastest & Cheapest) ⚡</span>
           </label>
           <label>
@@ -234,8 +243,8 @@
           </label>
         </div>
         <div class="rate-limit-info">
-          💡 <strong>Optimized for speed:</strong> 2-3 concurrent requests,
-          adaptive delays (1-2s), better error handling
+          💡 <strong>Claude recommended:</strong> Superior vision, 5-20+ RPM
+          limits, excellent text extraction from screenshots
         </div>
       </div>
       <div class="button-group">
