@@ -1,6 +1,9 @@
 const axios = require("axios");
 
 exports.handler = async function (event, context) {
+  // Declare startTime at function scope so it's available everywhere
+  const startTime = Date.now();
+
   // Ensure the request is a POST
   if (event.httpMethod !== "POST") {
     return {
@@ -14,7 +17,7 @@ exports.handler = async function (event, context) {
     const body = JSON.parse(event.body);
     const imageBase64 = body.imageBase64;
     const filename = body.filename || "unknown";
-    const selectedModel = body.selectedModel || "gpt-4.1-nano";
+    const selectedModel = body.selectedModel || "claude-3-5-sonnet-20241022";
 
     if (!imageBase64) {
       return {
@@ -26,7 +29,6 @@ exports.handler = async function (event, context) {
     console.log(`Processing file: ${filename} with model: ${selectedModel}`);
 
     let response;
-    const startTime = Date.now();
 
     // Determine which API to use based on the selected model
     if (selectedModel.startsWith("claude")) {
@@ -77,7 +79,7 @@ If multiple people are visible, separate each person with a blank line. Extract 
         response = await axios.post(
           claudeEndpoint,
           {
-            model: selectedModel,
+            model: "claude-3-5-sonnet-20241022", // Use exact model name
             max_tokens: 1500,
             messages: [
               {
