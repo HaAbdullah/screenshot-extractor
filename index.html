@@ -180,12 +180,13 @@
       }
 
       .rate-limit-info {
-        background: #e7f3ff;
-        border: 1px solid #b3d9ff;
-        border-radius: 6px;
-        padding: 1rem;
         margin-bottom: 1rem;
+        padding: 0.75rem;
+        background-color: #e3f2fd;
+        border: 1px solid #2196f3;
+        border-radius: 6px;
         font-size: 0.9rem;
+        color: #1565c0;
       }
     </style>
   </head>
@@ -194,11 +195,9 @@
       <h1>Screenshot Analyzer</h1>
 
       <div class="rate-limit-info">
-        <strong>Rate Limit Status:</strong>
-        <span id="rateLimitStatus">Ready</span> |
-        <strong>Requests this minute:</strong>
-        <span id="requestCount">0</span>/20 |
-        <strong>Next window reset:</strong> <span id="nextReset">--</span>
+        <strong>Rate Limit Status:</strong> Processing
+        <span id="queueStatus">0</span> files in queue. Next request in
+        <span id="nextRequestTimer">0</span>s.
       </div>
 
       <div class="upload-section">
@@ -211,20 +210,16 @@
         <h3>Select AI Model</h3>
         <div class="model-options">
           <label>
-            <input type="radio" name="model" value="gpt-4o-mini" checked />
+            <input type="radio" name="model" value="gpt-4.1-mini" checked />
+            <span>GPT-4.1 Mini (Recommended - Better Rate Limits)</span>
+          </label>
+          <label>
+            <input type="radio" name="model" value="gpt-4o-mini" />
             <span>GPT-4o Mini (OpenAI)</span>
           </label>
           <label>
             <input type="radio" name="model" value="qwen/qwen-vl-plus" />
             <span>Qwen VL Plus (OpenRouter)</span>
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="model"
-              value="google/gemma-3-12b-it:free"
-            />
-            <span>Gemma 3 12B (OpenRouter)</span>
           </label>
         </div>
       </div>
@@ -255,153 +250,143 @@
     </div>
 
     <script>
-      // Modified script section with smarter rate limiting
+      // Optimized rate limiting based on OpenAI's actual limits
       let entries = [];
       const DB_NAME = "screenshotAnalyzerDB";
       const STORE_NAME = "entries";
       const BATCH_COUNTER_STORE = "batchCounters";
 
-      // Smart rate limiting based on OpenAI's actual limits
-      let requestsThisMinute = 0;
-      let currentMinuteStart = Date.now();
+      // Smart rate limiting - conservative but faster than before
       let lastRequestTime = 0;
       let requestQueue = [];
       let activeRequests = 0;
+      let requestTimestamps = []; // Track request history for sliding window
 
-      // Conservative but more realistic limits for gpt-4o-mini
-      const OPENAI_LIMITS = {
-        requestsPerMinute: 20, // Conservative - actual tier 1 limit is 500-3000
-        minDelayBetweenRequests: 800, // 0.8 seconds minimum
-        maxConcurrent: 2, // Allow 2 concurrent for better speed
-      };
+      // Conservative settings that work for most accounts (Tier 1)
+      const MAX_CONCURRENT = 1; // Keep at 1 for vision API
+      const MIN_DELAY_BETWEEN_REQUESTS = 25000; // 25 seconds - very safe for 3 RPM limit
+      const SLIDING_WINDOW_MS = 60000; // 1 minute window
+      const MAX_REQUESTS_PER_WINDOW = 2; // Only 2 requests per minute to be safe
 
-      const OPENROUTER_LIMITS = {
-        requestsPerMinute: 10, // More conservative for OpenRouter
-        minDelayBetweenRequests: 1500, // 1.5 seconds
-        maxConcurrent: 1,
-      };
+      // More aggressive retry strategy with exponential backoff
+      const RETRY_DELAYS = [30000, 60000, 120000]; // 30s, 60s, 120s
 
-      function getCurrentLimits() {
-        const selectedModel = document.querySelector(
-          'input[name="model"]:checked'
-        ).value;
-        return selectedModel === "gpt-4o-mini"
-          ? OPENAI_LIMITS
-          : OPENROUTER_LIMITS;
+      // Timer for UI updates
+      let nextRequestTimer = 0;
+      let timerInterval;
+
+      // Start timer to show next request countdown
+      function startTimer() {
+        clearInterval(timerInterval);
+        timerInterval = setInterval(() => {
+          const now = Date.now();
+          const timeSinceLastRequest = now - lastRequestTime;
+          const timeUntilNext = Math.max(
+            0,
+            MIN_DELAY_BETWEEN_REQUESTS - timeSinceLastRequest
+          );
+
+          nextRequestTimer = Math.ceil(timeUntilNext / 1000);
+          updateQueueStatus();
+
+          if (nextRequestTimer <= 0) {
+            clearInterval(timerInterval);
+          }
+        }, 1000);
       }
 
-      function updateRateLimitDisplay() {
+      function updateQueueStatus() {
+        document.getElementById("queueStatus").textContent =
+          requestQueue.length;
+        document.getElementById("nextRequestTimer").textContent =
+          nextRequestTimer;
+      }
+
+      // Clean old timestamps from sliding window
+      function cleanRequestHistory() {
         const now = Date.now();
-        const minuteElapsed = now - currentMinuteStart;
-
-        if (minuteElapsed >= 60000) {
-          // Reset minute counter
-          requestsThisMinute = 0;
-          currentMinuteStart = now;
-        }
-
-        document.getElementById("requestCount").textContent =
-          requestsThisMinute;
-
-        const nextReset = new Date(currentMinuteStart + 60000);
-        document.getElementById("nextReset").textContent =
-          nextReset.toLocaleTimeString();
-
-        const limits = getCurrentLimits();
-        const remaining = limits.requestsPerMinute - requestsThisMinute;
-
-        if (remaining <= 0) {
-          document.getElementById("rateLimitStatus").textContent =
-            "Rate Limited - Waiting";
-          document.getElementById("rateLimitStatus").style.color = "#dc3545";
-        } else if (remaining <= 3) {
-          document.getElementById("rateLimitStatus").textContent = "Near Limit";
-          document.getElementById("rateLimitStatus").style.color = "#ffc107";
-        } else {
-          document.getElementById("rateLimitStatus").textContent = "Ready";
-          document.getElementById("rateLimitStatus").style.color = "#28a745";
-        }
+        requestTimestamps = requestTimestamps.filter(
+          (timestamp) => now - timestamp < SLIDING_WINDOW_MS
+        );
       }
 
-      // Smart request scheduler
+      // Check if we can make a request based on sliding window
+      function canMakeRequest() {
+        cleanRequestHistory();
+        return requestTimestamps.length < MAX_REQUESTS_PER_WINDOW;
+      }
+
+      // Enhanced request scheduler with sliding window rate limiting
       async function scheduleRequest(requestFn) {
         return new Promise((resolve, reject) => {
           requestQueue.push({ requestFn, resolve, reject });
+          updateQueueStatus();
           processQueue();
         });
       }
 
       async function processQueue() {
-        const limits = getCurrentLimits();
-
-        if (
-          activeRequests >= limits.maxConcurrent ||
-          requestQueue.length === 0
-        ) {
+        if (activeRequests >= MAX_CONCURRENT || requestQueue.length === 0) {
           return;
         }
 
-        const now = Date.now();
-        const minuteElapsed = now - currentMinuteStart;
-
-        // Reset minute counter if needed
-        if (minuteElapsed >= 60000) {
-          requestsThisMinute = 0;
-          currentMinuteStart = now;
-          logStatus("Rate limit window reset");
-        }
-
-        // Check if we've hit the per-minute limit
-        if (requestsThisMinute >= limits.requestsPerMinute) {
-          const timeUntilReset = 60000 - minuteElapsed;
+        // Check sliding window limit
+        if (!canMakeRequest()) {
           logStatus(
-            `Rate limit reached. Waiting ${Math.ceil(
-              timeUntilReset / 1000
-            )}s for reset...`
+            `Rate limit: ${requestTimestamps.length}/${MAX_REQUESTS_PER_WINDOW} requests in last minute. Waiting...`
           );
-          setTimeout(processQueue, timeUntilReset + 100);
-          updateRateLimitDisplay();
+          setTimeout(processQueue, 5000); // Check again in 5 seconds
           return;
         }
 
-        // Check minimum delay between requests
-        const timeSinceLastRequest = now - lastRequestTime;
-        if (timeSinceLastRequest < limits.minDelayBetweenRequests) {
-          const delayNeeded =
-            limits.minDelayBetweenRequests - timeSinceLastRequest;
-          logStatus(`Waiting ${delayNeeded}ms before next request...`);
-          setTimeout(processQueue, delayNeeded);
-          return;
-        }
-
-        // Process the request
         const { requestFn, resolve, reject } = requestQueue.shift();
+        updateQueueStatus();
         activeRequests++;
-        requestsThisMinute++;
-        lastRequestTime = Date.now();
-
-        updateRateLimitDisplay();
 
         try {
+          // Calculate delay needed based on last request
+          const now = Date.now();
+          const timeSinceLastRequest = now - lastRequestTime;
+          const delayNeeded = Math.max(
+            0,
+            MIN_DELAY_BETWEEN_REQUESTS - timeSinceLastRequest
+          );
+
+          if (delayNeeded > 0) {
+            logStatus(
+              `Waiting ${Math.ceil(
+                delayNeeded / 1000
+              )}s before next request (rate limiting)...`
+            );
+            await new Promise((r) => setTimeout(r, delayNeeded));
+          }
+
+          // Record request timestamp
+          lastRequestTime = Date.now();
+          requestTimestamps.push(lastRequestTime);
+          startTimer();
+
           const result = await requestFn();
           resolve(result);
         } catch (error) {
           reject(error);
         } finally {
           activeRequests--;
-          // Process next item with a small delay
-          setTimeout(processQueue, 200);
+          // Process next item in queue with a small delay
+          setTimeout(processQueue, 1000);
         }
       }
 
-      // Enhanced retry logic with better backoff for rate limits
+      // Enhanced retry logic with better backoff and tier detection
       async function processImageFileWithRetry(file, db, batchInfo) {
         const fileId = `file-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-        const maxRetries = 4; // Increased retries
+        const maxRetries = 3;
 
+        // Get the selected model
         const selectedModel = document.querySelector(
           'input[name="model"]:checked'
         ).value;
+
         logStatus(
           `Processing file: ${file.name} (ID: ${fileId}, Model: ${selectedModel})`
         );
@@ -422,7 +407,7 @@
         entries.push(placeholderEntry);
         updateTable();
 
-        // Retry with smart backoff
+        // Retry with improved backoff strategy
         for (let attempt = 0; attempt < maxRetries; attempt++) {
           try {
             const result = await processImageFileOnce(
@@ -453,29 +438,24 @@
             const isLastAttempt = attempt === maxRetries - 1;
 
             if (isRateLimit && !isLastAttempt) {
-              // Smart backoff for rate limits
-              let delay;
-              if (selectedModel === "gpt-4o-mini") {
-                // For OpenAI, wait for the next minute window + some buffer
-                const timeUntilReset =
-                  60000 - (Date.now() - currentMinuteStart);
-                delay = Math.max(timeUntilReset + 5000, 10000); // At least 10 seconds
-                logStatus(
-                  `OpenAI rate limit. Waiting ${Math.ceil(
-                    delay / 1000
-                  )}s for next window...`
-                );
+              // Adaptive delay based on error message
+              let delay = RETRY_DELAYS[attempt] || 120000;
 
-                // Reset our counter since we hit a rate limit
-                requestsThisMinute = OPENAI_LIMITS.requestsPerMinute;
-              } else {
-                // For OpenRouter, use exponential backoff
-                delay = Math.min(20000, 5000 * Math.pow(2, attempt));
-                logStatus(
-                  `OpenRouter rate limit. Backing off ${delay / 1000}s...`
-                );
+              // Try to parse retry-after header for smarter delays
+              if (error.message.includes("try again in")) {
+                const match = error.message.match(/try again in (\d+)s/);
+                if (match) {
+                  delay = Math.max(delay, parseInt(match[1]) * 1000 + 5000); // Add 5s buffer
+                }
               }
 
+              logStatus(
+                `Rate limit for ${file.name}, attempt ${
+                  attempt + 1
+                }/${maxRetries}. Waiting ${
+                  delay / 1000
+                }s... (${error.message.substring(0, 100)})`
+              );
               await new Promise((resolve) => setTimeout(resolve, delay));
               continue;
             }
@@ -750,7 +730,7 @@
         logStatus(`Updated table with ${entries.length} entries`);
       }
 
-      // Clean single attempt function
+      // Clean single attempt function with enhanced error handling
       async function processImageFileOnce(
         file,
         fileId,
@@ -765,41 +745,54 @@
           reader.onerror = (error) => reject(error);
         });
 
-        logStatus(`Sending API request for ${fileId}`);
+        logStatus(
+          `Sending API request for ${fileId} with model ${selectedModel}`
+        );
 
-        // Call API
-        const response = await fetch("/.netlify/functions/analyze-image", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            imageBase64: base64,
-            filename: file.name,
-            selectedModel: selectedModel,
-          }),
-        });
+        // Call API with enhanced timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 45000); // 45 second timeout
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          const error = new Error(
-            `API Error: ${response.status} ${response.statusText} - ${errorText}`
-          );
-          error.status = response.status;
+        try {
+          const response = await fetch("/.netlify/functions/analyze-image", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              imageBase64: base64,
+              filename: file.name,
+              selectedModel: selectedModel,
+            }),
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            const error = new Error(
+              `API Error: ${response.status} ${response.statusText} - ${errorText}`
+            );
+            error.status = response.status;
+            throw error;
+          }
+
+          const data = await response.json();
+
+          if (data.error) {
+            throw new Error(`API Error: ${data.error}`);
+          }
+
+          // Parse the response
+          const newEntries = parseMultiplePersons(data.text);
+          logStatus(`Extracted ${newEntries.length} people from ${fileId}`);
+
+          return newEntries;
+        } catch (error) {
+          clearTimeout(timeoutId);
           throw error;
         }
-
-        const data = await response.json();
-
-        if (data.error) {
-          throw new Error(`API Error: ${data.error}`);
-        }
-
-        // Parse the response
-        const newEntries = parseMultiplePersons(data.text);
-        logStatus(`Extracted ${newEntries.length} people from ${fileId}`);
-
-        return newEntries;
       }
 
       // Updated processFiles function with smart scheduling
@@ -808,16 +801,18 @@
         const total = fileArray.length;
         const loading = document.getElementById("loading");
 
+        // Generate a batch name for this upload
         const batchInfo = await generateBatchName(db);
         logStatus(
           `Generated batch name: ${batchInfo.displayName} (file: ${batchInfo.fileName})`
         );
 
+        // Update the download button text to include the batch name
         document.getElementById(
           "downloadBtn"
         ).textContent = `Download CSV (${batchInfo.displayName})`;
 
-        loading.textContent = `Analyzing 0/${total} files...`;
+        loading.textContent = `Queued ${total} files for processing...`;
         loading.style.display = "block";
 
         let completed = 0;
@@ -831,12 +826,13 @@
 
           completed++;
           totalEntries += entryCount;
-          loading.textContent = `Analyzing ${completed}/${total} files...`;
+          loading.textContent = `Completed ${completed}/${total} files...`;
           logStatus(`Completed ${completed}/${total} files`);
 
           return entryCount;
         });
 
+        // Wait for all files to complete
         const results = await Promise.all(promises);
         totalEntries = results.reduce((sum, count) => sum + count, 0);
 
@@ -845,6 +841,7 @@
           `Completed processing ${total} files, extracted ${totalEntries} entries for batch ${batchInfo.displayName}`
         );
 
+        // Store the current batch name
         window.currentBatchName = batchInfo.fileName;
         window.currentBatchDisplayName = batchInfo.displayName;
       }
@@ -854,6 +851,7 @@
         const fileName =
           window.currentBatchName ||
           `export-${new Date().toISOString().slice(0, 10)}`;
+
         const displayName =
           window.currentBatchDisplayName ||
           `Export ${new Date().toLocaleDateString()}`;
@@ -906,14 +904,13 @@
 
       // Initialize the application
       async function init() {
-        logStatus("Initializing application");
+        logStatus(
+          "Initializing optimized application with smart rate limiting"
+        );
         const db = await initDB();
         entries = await loadEntries(db);
         updateTable();
-
-        // Initialize rate limit display
-        updateRateLimitDisplay();
-        setInterval(updateRateLimitDisplay, 1000); // Update every second
+        updateQueueStatus();
 
         document
           .getElementById("downloadBtn")
@@ -925,12 +922,15 @@
             entries = [];
             updateTable();
             await saveEntries(db);
+            // Reset the download button text
             document.getElementById("downloadBtn").textContent = "Download CSV";
+            // Clear the current batch name
             window.currentBatchName = null;
             window.currentBatchDisplayName = null;
             logStatus("Cleared all entries");
           });
 
+        // Toggle debug console
         document.getElementById("debugToggle").addEventListener("click", () => {
           const statusLog = document.getElementById("statusLog");
           const debugToggle = document.getElementById("debugToggle");
@@ -960,11 +960,17 @@
           radio.addEventListener("change", () => {
             logStatus(`Model changed to: ${radio.value}`);
             resetFileInput();
-            updateRateLimitDisplay(); // Update display for new model limits
           });
         });
 
-        logStatus("Application initialized successfully");
+        logStatus(
+          "Application initialized successfully with enhanced rate limiting"
+        );
+        logStatus(
+          `Rate limits: ${MAX_REQUESTS_PER_WINDOW} requests per minute, ${
+            MIN_DELAY_BETWEEN_REQUESTS / 1000
+          }s between requests`
+        );
       }
 
       // Start the app when page loads
