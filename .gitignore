@@ -1,1 +1,4 @@
 test-cases/
+# Local Netlify folder
+.netlify
+.env

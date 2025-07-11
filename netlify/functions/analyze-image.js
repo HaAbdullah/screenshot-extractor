@@ -5,25 +5,7 @@ exports.handler = async function (event, context) {
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
       body: JSON.stringify({ error: "Method Not Allowed" }),
-    };
-  }
-
-  // Handle CORS preflight
-  if (event.httpMethod === "OPTIONS") {
-    return {
-      statusCode: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-      },
-      body: "",
     };
   }
 
@@ -37,241 +19,214 @@ exports.handler = async function (event, context) {
     if (!imageBase64) {
       return {
         statusCode: 400,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
         body: JSON.stringify({ error: "No image data provided" }),
       };
     }
 
     console.log(`Processing file: ${filename} with model: ${selectedModel}`);
-    console.log(`Image data length: ${imageBase64.length} characters`);
 
     let response;
 
     // Determine which API to use based on the selected model
     if (selectedModel === "gpt-4o-mini" || selectedModel === "gpt-4o") {
-      // OpenAI API call - use gpt-4o-mini for better rate limits
+      // OpenAI API call - optimized for better performance
       const modelToUse =
         selectedModel === "gpt-4o" ? "gpt-4o-mini" : selectedModel;
 
-      console.log(`Making OpenAI API call with model: ${modelToUse}`);
-
-      try {
-        response = await axios.post(
-          "https://api.openai.com/v1/chat/completions",
-          {
-            model: modelToUse,
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Analyze this image and extract text information visible such as: names, company names, job titles, and professional credentials. Format the information as:\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nFor multiple entries, separate with a blank line. For anything thats not visible, simply write '-' for consistency.",
+      response = await axios.post(
+        "https://api.openai.com/v1/chat/completions",
+        {
+          model: modelToUse,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Analyze this image and extract information for ALL people visible. For each person, provide:\nName: [full name if visible]\nCompany: [company/organization name]\nRole: [job title/position]\nCredentials: [degrees, certifications, etc.]\n\nIf multiple people are visible, separate each person with a blank line. Use '-' for any field that's not clearly visible. Be thorough and check the entire image carefully.",
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: imageBase64,
+                    detail: "high", // Request high detail for better text recognition
                   },
-                  {
-                    type: "image_url",
-                    image_url: { url: imageBase64 },
-                  },
-                ],
-              },
-            ],
-            max_tokens: 1000,
-            temperature: 0.3,
-          },
-          {
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+                },
+              ],
             },
-            timeout: 30000, // 30 seconds timeout
-          }
-        );
-
-        console.log(`OpenAI API response received for ${filename}`);
-
-        return {
-          statusCode: 200,
+          ],
+          max_tokens: 1500, // Increased for multiple people
+          temperature: 0.1, // Lower temperature for more consistent extraction
+        },
+        {
           headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
           },
-          body: JSON.stringify({
-            text: response.data.choices[0].message.content,
-            filename: filename,
-            model: modelToUse,
-          }),
-        };
-      } catch (openaiError) {
-        console.error(`OpenAI API error for ${filename}:`, openaiError.message);
-
-        if (openaiError.response) {
-          console.error(
-            `OpenAI API error details:`,
-            JSON.stringify(openaiError.response.data, null, 2)
-          );
+          timeout: 45000, // Increased timeout for complex images
+          // Add retry configuration
+          retry: {
+            retries: 0, // We handle retries in the frontend
+          },
         }
+      );
 
-        throw openaiError; // Re-throw to be handled by the main catch block
-      }
+      return {
+        statusCode: 200,
+        headers: {
+          "Cache-Control": "no-cache", // Prevent caching of responses
+        },
+        body: JSON.stringify({
+          text: response.data.choices[0].message.content,
+          filename: filename,
+          model: modelToUse,
+          usage: response.data.usage, // Include usage stats for monitoring
+        }),
+      };
     } else {
-      // OpenRouter API call for other models
+      // OpenRouter API call for other models - optimized
       const openRouterEndpoint =
         "https://openrouter.ai/api/v1/chat/completions";
 
-      console.log(`Making OpenRouter API call with model: ${selectedModel}`);
-
-      try {
-        response = await axios.post(
-          openRouterEndpoint,
-          {
-            model: selectedModel,
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Extract the full name, company name, job role, and professional credentials for ALL people visible in this image. If there are multiple people, list each person separately with a blank line between them. Format exactly as:\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nand so on for each person.",
-                  },
-                  {
-                    type: "image_url",
-                    image_url: { url: imageBase64 },
-                  },
-                ],
-              },
-            ],
-          },
-          {
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-              "HTTP-Referer":
-                process.env.APP_URL ||
-                "https://screenshot-analyzer.netlify.app",
-              "X-Title": "Screenshot Analyzer",
+      response = await axios.post(
+        openRouterEndpoint,
+        {
+          model: selectedModel,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Extract information for ALL people visible in this image. For each person found, format exactly as:\n\nName: [full name]\nCompany: [company name]\nRole: [job title]\nCredentials: [certifications/degrees]\n\n[blank line]\n\nName: [next person's name]\nCompany: [next person's company]\nRole: [next person's role]\nCredentials: [next person's credentials]\n\nContinue this pattern for each person. Use '-' if information is not visible. Examine the entire image thoroughly.",
+                },
+                {
+                  type: "image_url",
+                  image_url: { url: imageBase64 },
+                },
+              ],
             },
-            timeout: 30000,
-          }
-        );
-
-        console.log(`OpenRouter API response received for ${filename}`);
-
-        return {
-          statusCode: 200,
+          ],
+          max_tokens: 1500,
+          temperature: 0.1,
+        },
+        {
           headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            "HTTP-Referer":
+              process.env.APP_URL || "https://screenshot-analyzer.netlify.app",
+            "X-Title": "Screenshot Analyzer - Optimized",
           },
-          body: JSON.stringify({
-            text: response.data.choices[0].message.content,
-            filename: filename,
-            model: selectedModel,
-          }),
-        };
-      } catch (openRouterError) {
-        console.error(
-          `OpenRouter API error for ${filename}:`,
-          openRouterError.message
-        );
-
-        if (openRouterError.response) {
-          console.error(
-            `OpenRouter API error details:`,
-            JSON.stringify(openRouterError.response.data, null, 2)
-          );
+          timeout: 45000,
         }
+      );
 
-        throw openRouterError; // Re-throw to be handled by the main catch block
-      }
-    }
-  } catch (error) {
-    console.error(
-      `Error processing image ${body?.filename || "unknown"}: ${error.message}`
-    );
-
-    // Handle timeout errors specifically
-    if (error.code === "ECONNABORTED" || error.message.includes("timeout")) {
-      console.error(`Timeout error for ${body?.filename || "unknown"}`);
       return {
-        statusCode: 504,
+        statusCode: 200,
         headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Headers": "Content-Type",
+          "Cache-Control": "no-cache",
         },
         body: JSON.stringify({
-          error:
-            "Analysis timed out. Please try with a smaller image or try again later.",
+          text: response.data.choices[0].message.content,
+          filename: filename,
+          model: selectedModel,
+          usage: response.data.usage,
+        }),
+      };
+    }
+  } catch (error) {
+    console.error(`Error processing image: ${error.message}`);
+    console.error(`Error stack: ${error.stack}`);
+
+    // Enhanced error handling with detailed logging
+    if (error.code === "ECONNABORTED") {
+      console.error("Request timeout occurred");
+      return {
+        statusCode: 504,
+        body: JSON.stringify({
+          error: "Request timed out. The image may be too large or complex.",
           type: "timeout_error",
           isTimeout: true,
+          suggestion: "Try with a smaller image or different model",
         }),
       };
     }
 
-    // Handle API errors with enhanced rate limit handling
+    // Handle API errors with enhanced rate limit detection
     if (error.response && error.response.data) {
       const statusCode = error.response.status;
       const errorData = error.response.data;
       const errorMessage =
-        errorData.error?.message ||
-        errorData.message ||
-        error.response.statusText ||
-        "Unknown API error";
+        errorData.error?.message || error.response.statusText;
 
+      console.error(`API error (${statusCode}): ${errorMessage}`);
       console.error(
-        `API error (${statusCode}) for ${
-          body?.filename || "unknown"
-        }: ${errorMessage}`
+        "Error headers:",
+        JSON.stringify(error.response.headers, null, 2)
       );
       console.error("Full error response:", JSON.stringify(errorData, null, 2));
 
-      // Enhanced rate limit handling
+      // Enhanced rate limit handling with specific detection
       if (statusCode === 429) {
         const retryAfter =
           error.response.headers["retry-after"] ||
           error.response.headers["x-ratelimit-reset-requests"] ||
-          error.response.headers["x-ratelimit-reset"] ||
+          error.response.headers["x-ratelimit-reset-tokens"] ||
           60;
 
-        // Check if it's a specific OpenAI rate limit type
+        // More detailed rate limit classification
         let rateLimitType = "unknown";
-        let detailedMessage = errorMessage;
+        let suggestedDelay = parseInt(retryAfter);
 
-        if (errorMessage.includes("requests per minute")) {
+        if (
+          errorMessage.includes("requests per minute") ||
+          errorMessage.includes("RPM")
+        ) {
           rateLimitType = "requests_per_minute";
-        } else if (errorMessage.includes("tokens per minute")) {
+          suggestedDelay = Math.max(60, suggestedDelay);
+        } else if (
+          errorMessage.includes("tokens per minute") ||
+          errorMessage.includes("TPM")
+        ) {
           rateLimitType = "tokens_per_minute";
-        } else if (errorMessage.includes("requests per day")) {
+          suggestedDelay = Math.max(30, suggestedDelay);
+        } else if (
+          errorMessage.includes("requests per day") ||
+          errorMessage.includes("RPD")
+        ) {
           rateLimitType = "requests_per_day";
-        } else if (errorMessage.includes("quota")) {
-          rateLimitType = "quota_exceeded";
+          suggestedDelay = Math.max(3600, suggestedDelay); // 1 hour minimum for daily limits
+        } else if (errorMessage.includes("concurrent")) {
+          rateLimitType = "concurrent_requests";
+          suggestedDelay = Math.max(10, suggestedDelay);
         }
-
-        // Provide more helpful error messages
-        if (rateLimitType === "requests_per_minute") {
-          detailedMessage =
-            "Too many requests per minute. Please wait before uploading more images.";
-        } else if (rateLimitType === "quota_exceeded") {
-          detailedMessage =
-            "API quota exceeded. Please check your OpenAI account or try again later.";
-        }
-
-        console.error(`Rate limit hit (${rateLimitType}): ${detailedMessage}`);
 
         return {
           statusCode: 429,
           headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Retry-After": retryAfter.toString(),
+            "Retry-After": suggestedDelay.toString(),
           },
           body: JSON.stringify({
-            error: detailedMessage,
+            error: `Rate limit exceeded: ${errorMessage}`,
             type: "rate_limit_error",
-            retryAfter: parseInt(retryAfter),
             rateLimitType: rateLimitType,
+            retryAfter: suggestedDelay,
+            suggestion: `Please wait ${suggestedDelay} seconds before retrying`,
+            originalError: errorMessage,
+            timestamp: new Date().toISOString(),
+          }),
+        };
+      }
+
+      // Handle quota exceeded errors
+      if (statusCode === 403 && errorMessage.includes("quota")) {
+        return {
+          statusCode: 403,
+          body: JSON.stringify({
+            error: "API quota exceeded",
+            type: "quota_exceeded",
+            suggestion: "Please check your API usage limits",
             originalError: errorMessage,
           }),
         };
@@ -279,17 +234,13 @@ exports.handler = async function (event, context) {
 
       // Handle authentication errors
       if (statusCode === 401) {
-        console.error(`Authentication error: ${errorMessage}`);
         return {
           statusCode: 401,
-          headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-          },
           body: JSON.stringify({
-            error:
-              "API authentication failed. Please check API key configuration.",
+            error: "Authentication failed",
             type: "auth_error",
+            suggestion: "Please check your API key configuration",
+            originalError: errorMessage,
           }),
         };
       }
@@ -297,46 +248,42 @@ exports.handler = async function (event, context) {
       // Handle other API errors
       return {
         statusCode: statusCode,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
         body: JSON.stringify({
-          error: errorMessage,
+          error: `API Error: ${errorMessage}`,
           type: "api_error",
           statusCode: statusCode,
+          originalError: errorData,
+          suggestion:
+            statusCode >= 500
+              ? "This appears to be a server issue. Please try again in a few moments."
+              : "Please check your request and try again.",
         }),
       };
     }
 
-    // Handle network and other errors
-    if (error.code === "ECONNREFUSED" || error.code === "ENOTFOUND") {
-      console.error(`Network error: ${error.message}`);
+    // Handle network errors
+    if (error.code === "ENOTFOUND" || error.code === "ECONNREFUSED") {
       return {
         statusCode: 503,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
         body: JSON.stringify({
-          error: "Unable to connect to AI service. Please try again later.",
+          error: "Network error - unable to reach API service",
           type: "network_error",
+          suggestion: "Please check your internet connection and try again",
         }),
       };
     }
 
     // Handle other errors
-    console.error(`Unexpected error: ${error.message}`);
+    console.error("Unhandled error type:", error.code, error.message);
     return {
       statusCode: 500,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
-      },
       body: JSON.stringify({
-        error: "Internal server error. Please try again later.",
+        error: "Internal server error",
         type: "server_error",
-        details: error.message,
+        message: error.message,
+        suggestion:
+          "An unexpected error occurred. Please try again or contact support if the issue persists.",
+        timestamp: new Date().toISOString(),
       }),
     };
   }
