@@ -14,7 +14,7 @@ exports.handler = async function (event, context) {
     const body = JSON.parse(event.body);
     const imageBase64 = body.imageBase64;
     const filename = body.filename || "unknown";
-    const selectedModel = body.selectedModel || "gpt-4.1-mini";
+    const selectedModel = body.selectedModel || "gpt-4.1-nano";
 
     if (!imageBase64) {
       return {
@@ -26,24 +26,34 @@ exports.handler = async function (event, context) {
     console.log(`Processing file: ${filename} with model: ${selectedModel}`);
 
     let response;
+    const startTime = Date.now();
 
     // Determine which API to use based on the selected model
-    if (
-      selectedModel === "gpt-4o-mini" ||
-      selectedModel === "gpt-4o" ||
-      selectedModel === "gpt-4.1-mini"
-    ) {
-      // OpenAI API call - use optimized model selection
+    if (selectedModel.startsWith("gpt-4") || selectedModel === "gpt-4o-mini") {
+      // OpenAI API call - support new GPT-4.1 models
       let modelToUse = selectedModel;
 
-      // Map to best available models with better rate limits
-      if (selectedModel === "gpt-4o") {
-        modelToUse = "gpt-4.1-mini"; // Better rate limits and performance
-      } else if (selectedModel === "gpt-4.1-mini") {
-        modelToUse = "gpt-4.1-mini"; // Latest model with best rate limits
+      // Map to actual model names if needed
+      if (selectedModel === "gpt-4.1-nano") {
+        modelToUse = "gpt-4.1-nano"; // Use the actual model name
+      } else if (selectedModel === "gpt-4o") {
+        modelToUse = "gpt-4o-mini"; // Fallback to mini for better rate limits
       }
 
-      console.log(`Using OpenAI model: ${modelToUse}`);
+      // Enhanced prompt for better extraction
+      const analysisPrompt = `Analyze this image and extract ALL visible text information for EVERY person shown. Look carefully for:
+- Full names (first and last names)
+- Company/organization names  
+- Job titles/roles
+- Professional credentials, certifications, degrees
+
+Format each person exactly as:
+Name: [full name or - if not visible]
+Company: [company name or - if not visible]  
+Role: [job title or - if not visible]
+Credentials: [degrees/certifications or - if not visible]
+
+If multiple people are visible, separate each person with a blank line. Be thorough and extract all text you can see.`;
 
       response = await axios.post(
         "https://api.openai.com/v1/chat/completions",
@@ -55,7 +65,7 @@ exports.handler = async function (event, context) {
               content: [
                 {
                   type: "text",
-                  text: "Analyze this image and extract text information visible such as: names, company names, job titles, and professional credentials. Format the information as:\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nFor multiple entries, separate with a blank line. For anything that's not visible, simply write '-' for consistency. Be thorough and extract ALL visible people.",
+                  text: analysisPrompt,
                 },
                 {
                   type: "image_url",
@@ -64,54 +74,20 @@ exports.handler = async function (event, context) {
               ],
             },
           ],
-          max_tokens: 1000,
-          temperature: 0.3,
-          // Add stream: false to ensure we get complete responses
-          stream: false,
+          max_tokens: 1500, // Increased for better coverage
+          temperature: 0.1, // Lower for more consistent extraction
         },
         {
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
           },
-          timeout: 45000, // 45 second timeout to match frontend
-          // Add retry configuration for axios
-          validateStatus: function (status) {
-            // Accept 2xx and specific error codes we want to handle
-            return (status >= 200 && status < 300) || status === 429;
-          },
+          timeout: 30000,
         }
       );
 
-      // Handle rate limiting response specifically
-      if (response.status === 429) {
-        const retryAfter =
-          response.headers["retry-after"] ||
-          response.headers["x-ratelimit-reset-requests"] ||
-          60;
-
-        // Extract more specific error info from OpenAI response
-        const errorData = response.data;
-        const errorMessage = errorData.error?.message || "Rate limit exceeded";
-
-        console.error(`Rate limit hit: ${errorMessage}`);
-
-        return {
-          statusCode: 429,
-          headers: {
-            "Retry-After": retryAfter.toString(),
-            "X-RateLimit-Type": "openai-requests",
-          },
-          body: JSON.stringify({
-            error: `Rate limit exceeded: ${errorMessage}`,
-            type: "rate_limit_error",
-            retryAfter: parseInt(retryAfter),
-            originalError: errorMessage,
-            suggestion:
-              "Consider upgrading your OpenAI tier or waiting longer between requests",
-          }),
-        };
-      }
+      const processingTime = Date.now() - startTime;
+      console.log(`OpenAI API call completed in ${processingTime}ms`);
 
       return {
         statusCode: 200,
@@ -119,7 +95,7 @@ exports.handler = async function (event, context) {
           text: response.data.choices[0].message.content,
           filename: filename,
           model: modelToUse,
-          usage: response.data.usage || null,
+          processingTime: processingTime,
         }),
       };
     } else {
@@ -127,7 +103,20 @@ exports.handler = async function (event, context) {
       const openRouterEndpoint =
         "https://openrouter.ai/api/v1/chat/completions";
 
-      console.log(`Using OpenRouter model: ${selectedModel}`);
+      const analysisPrompt = `Extract the full name, company name, job role, and professional credentials for ALL people visible in this image. If there are multiple people, list each person separately with a blank line between them.
+
+Format exactly as:
+Name: [full name or - if not visible]
+Company: [company name or - if not visible]
+Role: [job title or - if not visible]  
+Credentials: [degrees/certifications or - if not visible]
+
+Name: [next person...]
+Company: [...]
+Role: [...]
+Credentials: [...]
+
+Look carefully at all text in the image including badges, name tags, titles, and any visible credentials.`;
 
       response = await axios.post(
         openRouterEndpoint,
@@ -139,7 +128,7 @@ exports.handler = async function (event, context) {
               content: [
                 {
                   type: "text",
-                  text: "Extract the full name, company name, job role, and professional credentials for ALL people visible in this image. If there are multiple people, list each person separately with a blank line between them. Format exactly as:\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nName: [...]\nCompany: [...]\nRole: [...]\nCredentials: [...]\n\nand so on for each person. Be thorough and accurate.",
+                  text: analysisPrompt,
                 },
                 {
                   type: "image_url",
@@ -148,8 +137,8 @@ exports.handler = async function (event, context) {
               ],
             },
           ],
-          max_tokens: 1000,
-          temperature: 0.3,
+          max_tokens: 1500,
+          temperature: 0.1,
         },
         {
           headers: {
@@ -159,35 +148,12 @@ exports.handler = async function (event, context) {
               process.env.APP_URL || "https://screenshot-analyzer.netlify.app",
             "X-Title": "Screenshot Analyzer",
           },
-          timeout: 45000,
-          validateStatus: function (status) {
-            return (status >= 200 && status < 300) || status === 429;
-          },
+          timeout: 30000,
         }
       );
 
-      // Handle OpenRouter rate limiting
-      if (response.status === 429) {
-        const retryAfter = response.headers["retry-after"] || 60;
-        const errorData = response.data;
-        const errorMessage = errorData.error?.message || "Rate limit exceeded";
-
-        console.error(`OpenRouter rate limit: ${errorMessage}`);
-
-        return {
-          statusCode: 429,
-          headers: {
-            "Retry-After": retryAfter.toString(),
-            "X-RateLimit-Type": "openrouter",
-          },
-          body: JSON.stringify({
-            error: `OpenRouter rate limit: ${errorMessage}`,
-            type: "rate_limit_error",
-            retryAfter: parseInt(retryAfter),
-            originalError: errorMessage,
-          }),
-        };
-      }
+      const processingTime = Date.now() - startTime;
+      console.log(`OpenRouter API call completed in ${processingTime}ms`);
 
       return {
         statusCode: 200,
@@ -195,27 +161,29 @@ exports.handler = async function (event, context) {
           text: response.data.choices[0].message.content,
           filename: filename,
           model: selectedModel,
-          usage: response.data.usage || null,
+          processingTime: processingTime,
         }),
       };
     }
   } catch (error) {
-    console.error(`Error processing image: ${error.message}`);
+    const processingTime = Date.now() - startTime;
+    console.error(
+      `Error processing image after ${processingTime}ms: ${error.message}`
+    );
 
     // Handle timeout errors specifically
-    if (error.code === "ECONNABORTED" || error.message.includes("timeout")) {
+    if (error.code === "ECONNABORTED") {
       return {
         statusCode: 504,
         body: JSON.stringify({
-          error:
-            "Analysis timed out. Please try with a smaller image or try again.",
-          isTimeout: true,
+          error: "Analysis timed out. Please try with a smaller image.",
           type: "timeout_error",
+          isTimeout: true,
         }),
       };
     }
 
-    // Handle API errors with enhanced rate limit handling
+    // Enhanced API error handling
     if (error.response && error.response.data) {
       const statusCode = error.response.status;
       const errorData = error.response.data;
@@ -225,63 +193,60 @@ exports.handler = async function (event, context) {
       console.error(`API error (${statusCode}): ${errorMessage}`);
       console.error("Full error response:", JSON.stringify(errorData, null, 2));
 
-      // Enhanced rate limit handling for different scenarios
+      // Enhanced rate limit handling with more context
       if (statusCode === 429) {
         const retryAfter =
           error.response.headers["retry-after"] ||
           error.response.headers["x-ratelimit-reset-requests"] ||
+          error.response.headers["x-ratelimit-reset"] ||
           60;
 
-        // Determine rate limit type for better user guidance
-        let rateLimitType = "unknown";
-        let suggestion = "Please wait and try again";
+        // Determine rate limit type for better client handling
+        let rateLimitType = "requests_per_minute"; // Default assumption
+        let rateLimitDetails = "";
 
         if (errorMessage.includes("requests per minute")) {
           rateLimitType = "requests_per_minute";
-          suggestion =
-            "You're sending requests too quickly. Wait at least 25 seconds between requests.";
+          rateLimitDetails = "You're making too many requests per minute.";
         } else if (errorMessage.includes("tokens per minute")) {
           rateLimitType = "tokens_per_minute";
-          suggestion =
-            "Your account has reached the token limit. Try smaller images or wait for the limit to reset.";
+          rateLimitDetails = "You're using too many tokens per minute.";
         } else if (errorMessage.includes("requests per day")) {
           rateLimitType = "requests_per_day";
-          suggestion =
-            "Daily request limit reached. Upgrade your OpenAI plan or wait until tomorrow.";
-        } else if (errorMessage.includes("Limit: 3")) {
-          rateLimitType = "tier_1_limit";
-          suggestion =
-            "Your account is on Tier 1 (3 requests/min). Consider upgrading your OpenAI tier by making a payment.";
+          rateLimitDetails = "You've exceeded your daily request limit.";
+        } else if (errorMessage.includes("quota")) {
+          rateLimitType = "quota_exceeded";
+          rateLimitDetails = "You've exceeded your account quota.";
         }
 
         return {
           statusCode: 429,
-          headers: {
-            "Retry-After": retryAfter.toString(),
-            "X-RateLimit-Type": rateLimitType,
-          },
           body: JSON.stringify({
-            error: `Rate limit exceeded (${rateLimitType}): ${errorMessage}`,
+            error: `Rate limit exceeded. ${rateLimitDetails}`,
             type: "rate_limit_error",
             retryAfter: parseInt(retryAfter),
             rateLimitType: rateLimitType,
+            details: rateLimitDetails,
             originalError: errorMessage,
-            suggestion: suggestion,
+            suggestion:
+              rateLimitType === "quota_exceeded"
+                ? "Please check your billing and plan limits at https://platform.openai.com/usage"
+                : "Please wait before making more requests.",
           }),
         };
       }
 
-      // Handle insufficient quota errors
-      if (statusCode === 402 || errorMessage.includes("insufficient_quota")) {
+      // Handle insufficient quota specifically
+      if (statusCode === 403 || errorMessage.includes("insufficient_quota")) {
         return {
-          statusCode: 402,
+          statusCode: 403,
           body: JSON.stringify({
             error:
-              "Insufficient quota. Please add credit to your OpenAI account.",
+              "Insufficient quota. Please check your billing and plan limits.",
             type: "quota_error",
-            originalError: errorMessage,
             suggestion:
-              "Add funds to your OpenAI account at https://platform.openai.com/account/billing",
+              "Visit https://platform.openai.com/usage to check your usage and billing.",
+            originalError: errorMessage,
           }),
         };
       }
@@ -292,28 +257,36 @@ exports.handler = async function (event, context) {
         body: JSON.stringify({
           error: errorMessage,
           type: "api_error",
+          statusCode: statusCode,
+          suggestion:
+            statusCode >= 500
+              ? "API service issue, please try again later."
+              : "Please check your request.",
           originalError: errorData,
         }),
       };
     }
 
     // Handle network and other errors
+    let errorType = "server_error";
+    let suggestion = "Please try again.";
+
     if (error.code === "ENOTFOUND" || error.code === "ECONNREFUSED") {
-      return {
-        statusCode: 503,
-        body: JSON.stringify({
-          error: "Service temporarily unavailable. Please try again.",
-          type: "network_error",
-        }),
-      };
+      errorType = "network_error";
+      suggestion =
+        "Network connection issue. Please check your internet connection.";
+    } else if (error.code === "ETIMEDOUT") {
+      errorType = "timeout_error";
+      suggestion = "Request timed out. Please try again with a smaller image.";
     }
 
-    // Handle other errors
     return {
       statusCode: 500,
       body: JSON.stringify({
         error: "Internal server error: " + error.message,
-        type: "server_error",
+        type: errorType,
+        suggestion: suggestion,
+        code: error.code,
       }),
     };
   }

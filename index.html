@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Screenshot Analyzer</title>
+    <title>Screenshot Analyzer - Optimized</title>
     <style>
       body {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
@@ -179,26 +179,29 @@
         color: #007bff;
       }
 
-      .rate-limit-info {
-        margin-bottom: 1rem;
-        padding: 0.75rem;
-        background-color: #e3f2fd;
-        border: 1px solid #2196f3;
+      .performance-stats {
+        margin-top: 1rem;
+        padding: 1rem;
+        background-color: #e8f5e8;
         border-radius: 6px;
         font-size: 0.9rem;
-        color: #1565c0;
+        color: #2d5a2d;
+      }
+
+      .rate-limit-info {
+        margin-top: 0.5rem;
+        padding: 0.5rem;
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 4px;
+        font-size: 0.85rem;
+        color: #856404;
       }
     </style>
   </head>
   <body>
     <div class="container">
-      <h1>Screenshot Analyzer</h1>
-
-      <div class="rate-limit-info">
-        <strong>Rate Limit Status:</strong> Processing
-        <span id="queueStatus">0</span> files in queue. Next request in
-        <span id="nextRequestTimer">0</span>s.
-      </div>
+      <h1>Screenshot Analyzer - Optimized ⚡</h1>
 
       <div class="upload-section">
         <input type="file" id="fileInput" accept="image/*" multiple />
@@ -210,8 +213,8 @@
         <h3>Select AI Model</h3>
         <div class="model-options">
           <label>
-            <input type="radio" name="model" value="gpt-4.1-mini" checked />
-            <span>GPT-4.1 Mini (Recommended - Better Rate Limits)</span>
+            <input type="radio" name="model" value="gpt-4.1-nano" checked />
+            <span>GPT-4.1 Nano (Fastest & Cheapest) ⚡</span>
           </label>
           <label>
             <input type="radio" name="model" value="gpt-4o-mini" />
@@ -221,12 +224,33 @@
             <input type="radio" name="model" value="qwen/qwen-vl-plus" />
             <span>Qwen VL Plus (OpenRouter)</span>
           </label>
+          <label>
+            <input
+              type="radio"
+              name="model"
+              value="google/gemma-3-12b-it:free"
+            />
+            <span>Gemma 3 12B (OpenRouter)</span>
+          </label>
+        </div>
+        <div class="rate-limit-info">
+          💡 <strong>Optimized for speed:</strong> 2-3 concurrent requests,
+          adaptive delays (1-2s), better error handling
         </div>
       </div>
       <div class="button-group">
         <button class="clear-btn" id="clearBtn">Clear All</button>
         <button class="download-btn" id="downloadBtn">Download CSV</button>
       </div>
+
+      <div
+        class="performance-stats"
+        id="performanceStats"
+        style="display: none"
+      >
+        <strong>Session Stats:</strong> <span id="statsText"></span>
+      </div>
+
       <table>
         <thead>
           <tr>
@@ -250,143 +274,186 @@
     </div>
 
     <script>
-      // Optimized rate limiting based on OpenAI's actual limits
+      // Optimized rate limiting - faster but still safe
       let entries = [];
       const DB_NAME = "screenshotAnalyzerDB";
       const STORE_NAME = "entries";
       const BATCH_COUNTER_STORE = "batchCounters";
 
-      // Smart rate limiting - conservative but faster than before
+      // Performance tracking
+      let sessionStats = {
+        totalRequests: 0,
+        successfulRequests: 0,
+        rateLimitErrors: 0,
+        averageResponseTime: 0,
+        startTime: Date.now(),
+      };
+
+      // Optimized rate limiting - much faster but still safe
       let lastRequestTime = 0;
       let requestQueue = [];
       let activeRequests = 0;
-      let requestTimestamps = []; // Track request history for sliding window
+      const MAX_CONCURRENT = 3; // Increased from 1 to 3 for faster processing
+      let MIN_DELAY_BETWEEN_REQUESTS = 1000; // Start with 1 second (reduced from 3)
+      const RETRY_DELAYS = [2000, 5000, 10000]; // Reduced initial retry delays
 
-      // Conservative settings that work for most accounts (Tier 1)
-      const MAX_CONCURRENT = 1; // Keep at 1 for vision API
-      const MIN_DELAY_BETWEEN_REQUESTS = 25000; // 25 seconds - very safe for 3 RPM limit
-      const SLIDING_WINDOW_MS = 60000; // 1 minute window
-      const MAX_REQUESTS_PER_WINDOW = 2; // Only 2 requests per minute to be safe
+      // Dynamic rate limit adjustment
+      let consecutiveSuccesses = 0;
+      let recentErrors = [];
+      const ERROR_WINDOW_MS = 60000; // Track errors in last minute
 
-      // More aggressive retry strategy with exponential backoff
-      const RETRY_DELAYS = [30000, 60000, 120000]; // 30s, 60s, 120s
+      // Adaptive delay adjustment based on success/failure patterns
+      function adjustRateLimit(wasSuccessful, responseTime) {
+        const now = Date.now();
 
-      // Timer for UI updates
-      let nextRequestTimer = 0;
-      let timerInterval;
-
-      // Start timer to show next request countdown
-      function startTimer() {
-        clearInterval(timerInterval);
-        timerInterval = setInterval(() => {
-          const now = Date.now();
-          const timeSinceLastRequest = now - lastRequestTime;
-          const timeUntilNext = Math.max(
-            0,
-            MIN_DELAY_BETWEEN_REQUESTS - timeSinceLastRequest
+        if (wasSuccessful) {
+          consecutiveSuccesses++;
+          // Speed up if we're having consistent success
+          if (consecutiveSuccesses >= 5 && MIN_DELAY_BETWEEN_REQUESTS > 500) {
+            MIN_DELAY_BETWEEN_REQUESTS = Math.max(
+              500,
+              MIN_DELAY_BETWEEN_REQUESTS - 200
+            );
+            logStatus(
+              `Speeding up: reduced delay to ${MIN_DELAY_BETWEEN_REQUESTS}ms after ${consecutiveSuccesses} successes`
+            );
+          }
+        } else {
+          consecutiveSuccesses = 0;
+          recentErrors.push(now);
+          // Clean old errors
+          recentErrors = recentErrors.filter(
+            (time) => now - time < ERROR_WINDOW_MS
           );
 
-          nextRequestTimer = Math.ceil(timeUntilNext / 1000);
-          updateQueueStatus();
-
-          if (nextRequestTimer <= 0) {
-            clearInterval(timerInterval);
+          // Slow down if we're getting rate limited
+          if (recentErrors.length >= 2) {
+            MIN_DELAY_BETWEEN_REQUESTS = Math.min(
+              5000,
+              MIN_DELAY_BETWEEN_REQUESTS + 1000
+            );
+            logStatus(
+              `Slowing down: increased delay to ${MIN_DELAY_BETWEEN_REQUESTS}ms due to recent errors`
+            );
           }
-        }, 1000);
+        }
+
+        // Update performance stats
+        sessionStats.averageResponseTime = sessionStats.averageResponseTime
+          ? (sessionStats.averageResponseTime + responseTime) / 2
+          : responseTime;
+        updatePerformanceDisplay();
       }
 
-      function updateQueueStatus() {
-        document.getElementById("queueStatus").textContent =
-          requestQueue.length;
-        document.getElementById("nextRequestTimer").textContent =
-          nextRequestTimer;
-      }
-
-      // Clean old timestamps from sliding window
-      function cleanRequestHistory() {
-        const now = Date.now();
-        requestTimestamps = requestTimestamps.filter(
-          (timestamp) => now - timestamp < SLIDING_WINDOW_MS
+      function updatePerformanceDisplay() {
+        const stats = document.getElementById("performanceStats");
+        const statsText = document.getElementById("statsText");
+        const runtime = Math.round(
+          (Date.now() - sessionStats.startTime) / 1000
         );
+        const successRate =
+          sessionStats.totalRequests > 0
+            ? Math.round(
+                (sessionStats.successfulRequests / sessionStats.totalRequests) *
+                  100
+              )
+            : 0;
+
+        statsText.innerHTML = `
+          Requests: ${sessionStats.successfulRequests}/${
+          sessionStats.totalRequests
+        } (${successRate}% success) | 
+          Runtime: ${runtime}s | 
+          Avg Response: ${Math.round(sessionStats.averageResponseTime)}ms | 
+          Rate Limit Errors: ${sessionStats.rateLimitErrors} | 
+          Current Delay: ${MIN_DELAY_BETWEEN_REQUESTS}ms
+        `;
+        stats.style.display = "block";
       }
 
-      // Check if we can make a request based on sliding window
-      function canMakeRequest() {
-        cleanRequestHistory();
-        return requestTimestamps.length < MAX_REQUESTS_PER_WINDOW;
-      }
-
-      // Enhanced request scheduler with sliding window rate limiting
+      // Improved request scheduler with better concurrency
       async function scheduleRequest(requestFn) {
         return new Promise((resolve, reject) => {
-          requestQueue.push({ requestFn, resolve, reject });
-          updateQueueStatus();
+          requestQueue.push({
+            requestFn,
+            resolve,
+            reject,
+            queueTime: Date.now(),
+          });
           processQueue();
         });
       }
 
       async function processQueue() {
-        if (activeRequests >= MAX_CONCURRENT || requestQueue.length === 0) {
-          return;
-        }
+        // Process multiple items if we have capacity
+        while (activeRequests < MAX_CONCURRENT && requestQueue.length > 0) {
+          const { requestFn, resolve, reject, queueTime } =
+            requestQueue.shift();
+          activeRequests++;
 
-        // Check sliding window limit
-        if (!canMakeRequest()) {
-          logStatus(
-            `Rate limit: ${requestTimestamps.length}/${MAX_REQUESTS_PER_WINDOW} requests in last minute. Waiting...`
-          );
-          setTimeout(processQueue, 5000); // Check again in 5 seconds
-          return;
+          processRequest(requestFn, resolve, reject, queueTime);
         }
+      }
 
-        const { requestFn, resolve, reject } = requestQueue.shift();
-        updateQueueStatus();
-        activeRequests++;
+      async function processRequest(requestFn, resolve, reject, queueTime) {
+        const requestStartTime = Date.now();
 
         try {
-          // Calculate delay needed based on last request
+          // Calculate delay needed (but be smarter about it)
           const now = Date.now();
           const timeSinceLastRequest = now - lastRequestTime;
-          const delayNeeded = Math.max(
+          let delayNeeded = Math.max(
             0,
             MIN_DELAY_BETWEEN_REQUESTS - timeSinceLastRequest
           );
 
+          // Reduce delay for concurrent requests (spread them out slightly)
+          if (activeRequests > 1) {
+            delayNeeded = Math.max(200, delayNeeded * 0.7); // Reduced minimum delay for concurrent
+          }
+
           if (delayNeeded > 0) {
             logStatus(
-              `Waiting ${Math.ceil(
-                delayNeeded / 1000
-              )}s before next request (rate limiting)...`
+              `Waiting ${delayNeeded}ms before next request (${activeRequests} active)...`
             );
             await new Promise((r) => setTimeout(r, delayNeeded));
           }
 
-          // Record request timestamp
           lastRequestTime = Date.now();
-          requestTimestamps.push(lastRequestTime);
-          startTimer();
+          sessionStats.totalRequests++;
 
           const result = await requestFn();
+          const responseTime = Date.now() - requestStartTime;
+
+          sessionStats.successfulRequests++;
+          adjustRateLimit(true, responseTime);
           resolve(result);
         } catch (error) {
+          const responseTime = Date.now() - requestStartTime;
+          adjustRateLimit(false, responseTime);
+
+          if (
+            error.message.includes("429") ||
+            error.message.includes("rate limit")
+          ) {
+            sessionStats.rateLimitErrors++;
+          }
           reject(error);
         } finally {
           activeRequests--;
-          // Process next item in queue with a small delay
-          setTimeout(processQueue, 1000);
+          // Process next batch with a small stagger
+          setTimeout(processQueue, 100);
         }
       }
 
-      // Enhanced retry logic with better backoff and tier detection
+      // Improved retry logic with better backoff
       async function processImageFileWithRetry(file, db, batchInfo) {
         const fileId = `file-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
         const maxRetries = 3;
 
-        // Get the selected model
         const selectedModel = document.querySelector(
           'input[name="model"]:checked'
         ).value;
-
         logStatus(
           `Processing file: ${file.name} (ID: ${fileId}, Model: ${selectedModel})`
         );
@@ -407,7 +474,7 @@
         entries.push(placeholderEntry);
         updateTable();
 
-        // Retry with improved backoff strategy
+        // Improved retry strategy
         for (let attempt = 0; attempt < maxRetries; attempt++) {
           try {
             const result = await processImageFileOnce(
@@ -438,25 +505,19 @@
             const isLastAttempt = attempt === maxRetries - 1;
 
             if (isRateLimit && !isLastAttempt) {
-              // Adaptive delay based on error message
-              let delay = RETRY_DELAYS[attempt] || 120000;
-
-              // Try to parse retry-after header for smarter delays
-              if (error.message.includes("try again in")) {
-                const match = error.message.match(/try again in (\d+)s/);
-                if (match) {
-                  delay = Math.max(delay, parseInt(match[1]) * 1000 + 5000); // Add 5s buffer
-                }
-              }
-
+              // Use more intelligent retry delays
+              const baseDelay = RETRY_DELAYS[attempt] || 10000;
+              const jitteredDelay = baseDelay + Math.random() * 2000; // Add jitter
               logStatus(
                 `Rate limit for ${file.name}, attempt ${
                   attempt + 1
-                }/${maxRetries}. Waiting ${
-                  delay / 1000
-                }s... (${error.message.substring(0, 100)})`
+                }/${maxRetries}. Waiting ${Math.round(
+                  jitteredDelay / 1000
+                )}s...`
               );
-              await new Promise((resolve) => setTimeout(resolve, delay));
+              await new Promise((resolve) =>
+                setTimeout(resolve, jitteredDelay)
+              );
               continue;
             }
 
@@ -506,7 +567,6 @@
         statusText.scrollTop = statusText.scrollHeight;
         console.log(logEntry);
 
-        // Show the log if it's an error
         if (isError) {
           document.getElementById("statusLog").style.display = "block";
           document.getElementById("debugToggle").textContent =
@@ -632,7 +692,6 @@
           const store = transaction.objectStore(STORE_NAME);
 
           store.clear();
-
           entries.forEach((entry) => {
             store.add(entry);
           });
@@ -730,14 +789,13 @@
         logStatus(`Updated table with ${entries.length} entries`);
       }
 
-      // Clean single attempt function with enhanced error handling
+      // Process single image file
       async function processImageFileOnce(
         file,
         fileId,
         batchInfo,
         selectedModel
       ) {
-        // Convert image to base64
         const base64 = await new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.readAsDataURL(file);
@@ -745,80 +803,73 @@
           reader.onerror = (error) => reject(error);
         });
 
-        logStatus(
-          `Sending API request for ${fileId} with model ${selectedModel}`
-        );
+        logStatus(`Sending API request for ${fileId}`);
 
-        // Call API with enhanced timeout
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 45000); // 45 second timeout
+        const response = await fetch("/.netlify/functions/analyze-image", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            imageBase64: base64,
+            filename: file.name,
+            selectedModel: selectedModel,
+          }),
+        });
 
-        try {
-          const response = await fetch("/.netlify/functions/analyze-image", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              imageBase64: base64,
-              filename: file.name,
-              selectedModel: selectedModel,
-            }),
-            signal: controller.signal,
-          });
-
-          clearTimeout(timeoutId);
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            const error = new Error(
-              `API Error: ${response.status} ${response.statusText} - ${errorText}`
-            );
-            error.status = response.status;
-            throw error;
-          }
-
-          const data = await response.json();
-
-          if (data.error) {
-            throw new Error(`API Error: ${data.error}`);
-          }
-
-          // Parse the response
-          const newEntries = parseMultiplePersons(data.text);
-          logStatus(`Extracted ${newEntries.length} people from ${fileId}`);
-
-          return newEntries;
-        } catch (error) {
-          clearTimeout(timeoutId);
+        if (!response.ok) {
+          const errorText = await response.text();
+          const error = new Error(
+            `API Error: ${response.status} ${response.statusText} - ${errorText}`
+          );
+          error.status = response.status;
           throw error;
         }
+
+        const data = await response.json();
+
+        if (data.error) {
+          throw new Error(`API Error: ${data.error}`);
+        }
+
+        const newEntries = parseMultiplePersons(data.text);
+        logStatus(`Extracted ${newEntries.length} people from ${fileId}`);
+
+        return newEntries;
       }
 
-      // Updated processFiles function with smart scheduling
+      // Updated processFiles function with optimized scheduling
       async function processFiles(files, db) {
         const fileArray = Array.from(files);
         const total = fileArray.length;
         const loading = document.getElementById("loading");
 
-        // Generate a batch name for this upload
+        // Reset session stats for new batch
+        sessionStats.totalRequests = 0;
+        sessionStats.successfulRequests = 0;
+        sessionStats.rateLimitErrors = 0;
+        sessionStats.averageResponseTime = 0;
+        sessionStats.startTime = Date.now();
+
         const batchInfo = await generateBatchName(db);
         logStatus(
           `Generated batch name: ${batchInfo.displayName} (file: ${batchInfo.fileName})`
         );
+        logStatus(
+          `Starting optimized processing of ${total} files with ${MAX_CONCURRENT} concurrent requests`
+        );
 
-        // Update the download button text to include the batch name
         document.getElementById(
           "downloadBtn"
         ).textContent = `Download CSV (${batchInfo.displayName})`;
 
-        loading.textContent = `Queued ${total} files for processing...`;
+        loading.textContent = `Analyzing 0/${total} files...`;
         loading.style.display = "block";
 
         let completed = 0;
         let totalEntries = 0;
 
-        // Process all files with smart rate limiting
+        // Process all files with optimized concurrency
         const promises = fileArray.map(async (file, index) => {
           const entryCount = await scheduleRequest(() =>
             processImageFileWithRetry(file, db, batchInfo)
@@ -826,22 +877,21 @@
 
           completed++;
           totalEntries += entryCount;
-          loading.textContent = `Completed ${completed}/${total} files...`;
+          loading.textContent = `Analyzing ${completed}/${total} files...`;
           logStatus(`Completed ${completed}/${total} files`);
 
           return entryCount;
         });
 
-        // Wait for all files to complete
         const results = await Promise.all(promises);
         totalEntries = results.reduce((sum, count) => sum + count, 0);
 
         loading.style.display = "none";
         logStatus(
-          `Completed processing ${total} files, extracted ${totalEntries} entries for batch ${batchInfo.displayName}`
+          `✅ Batch complete! Processed ${total} files, extracted ${totalEntries} entries for batch ${batchInfo.displayName}`
         );
+        updatePerformanceDisplay();
 
-        // Store the current batch name
         window.currentBatchName = batchInfo.fileName;
         window.currentBatchDisplayName = batchInfo.displayName;
       }
@@ -851,7 +901,6 @@
         const fileName =
           window.currentBatchName ||
           `export-${new Date().toISOString().slice(0, 10)}`;
-
         const displayName =
           window.currentBatchDisplayName ||
           `Export ${new Date().toLocaleDateString()}`;
@@ -904,13 +953,10 @@
 
       // Initialize the application
       async function init() {
-        logStatus(
-          "Initializing optimized application with smart rate limiting"
-        );
+        logStatus("Initializing optimized screenshot analyzer");
         const db = await initDB();
         entries = await loadEntries(db);
         updateTable();
-        updateQueueStatus();
 
         document
           .getElementById("downloadBtn")
@@ -922,12 +968,19 @@
             entries = [];
             updateTable();
             await saveEntries(db);
-            // Reset the download button text
             document.getElementById("downloadBtn").textContent = "Download CSV";
-            // Clear the current batch name
             window.currentBatchName = null;
             window.currentBatchDisplayName = null;
-            logStatus("Cleared all entries");
+            // Reset session stats
+            sessionStats = {
+              totalRequests: 0,
+              successfulRequests: 0,
+              rateLimitErrors: 0,
+              averageResponseTime: 0,
+              startTime: Date.now(),
+            };
+            document.getElementById("performanceStats").style.display = "none";
+            logStatus("Cleared all entries and reset stats");
           });
 
         // Toggle debug console
@@ -963,13 +1016,9 @@
           });
         });
 
+        logStatus("✅ Optimized application initialized successfully");
         logStatus(
-          "Application initialized successfully with enhanced rate limiting"
-        );
-        logStatus(
-          `Rate limits: ${MAX_REQUESTS_PER_WINDOW} requests per minute, ${
-            MIN_DELAY_BETWEEN_REQUESTS / 1000
-          }s between requests`
+          "🚀 Ready for faster processing with adaptive rate limiting!"
         );
       }
 
