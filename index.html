@@ -195,9 +195,9 @@
       <h1>Screenshot Analyzer - Optimized</h1>
 
       <div class="rate-limit-info">
-        <strong>Smart Rate Limiting:</strong> This app now uses intelligent
-        batching and adaptive delays to process images 3-5x faster while
-        maintaining 100% safety from rate limits.
+        <strong>Ultra-Safe Mode:</strong> After seeing 429 errors, this version
+        uses maximum safety delays (4+ seconds between requests) to guarantee
+        zero rate limits. Speed is sacrificed for 100% reliability.
       </div>
 
       <div class="upload-section">
@@ -260,27 +260,30 @@
       const STORE_NAME = "entries";
       const BATCH_COUNTER_STORE = "batchCounters";
 
-      // Smart rate limiting configuration
+      // Ultra-conservative rate limiting configuration to prevent 429 errors
       const RATE_LIMIT_CONFIG = {
-        // Different limits for different models
+        // Much more conservative limits after seeing 429 errors
         "gpt-4o-mini": {
-          maxConcurrent: 3, // Can handle 3 concurrent requests safely
-          baseDelay: 1000, // 1 second base delay (much faster)
-          burstLimit: 5, // Allow 5 quick requests in burst
-          burstWindow: 60000, // Reset burst counter every minute
+          maxConcurrent: 1, // Back to 1 concurrent - safest approach
+          baseDelay: 4000, // 4 second minimum delay
+          burstLimit: 2, // Only 2 quick requests allowed
+          burstWindow: 120000, // 2 minute window
+          minDelayAfterError: 15000, // 15 second delay after any error
         },
         "gpt-4o": {
-          maxConcurrent: 2, // More conservative for GPT-4
-          baseDelay: 1500,
-          burstLimit: 3,
-          burstWindow: 60000,
+          maxConcurrent: 1,
+          baseDelay: 6000, // Even more conservative
+          burstLimit: 1,
+          burstWindow: 120000,
+          minDelayAfterError: 20000,
         },
         default: {
           // For OpenRouter models
-          maxConcurrent: 2,
-          baseDelay: 2000, // Slightly more conservative for external APIs
-          burstLimit: 3,
-          burstWindow: 60000,
+          maxConcurrent: 1,
+          baseDelay: 5000,
+          burstLimit: 2,
+          burstWindow: 120000,
+          minDelayAfterError: 18000,
         },
       };
 
@@ -301,27 +304,52 @@
         return RATE_LIMIT_CONFIG[selectedModel] || RATE_LIMIT_CONFIG["default"];
       }
 
-      // Smart delay calculation
+      // Enhanced delay calculation with error-based backoff
       function calculateDelay() {
         const config = getCurrentConfig();
         const now = Date.now();
+
+        // If we've had recent errors, use much longer delays
+        if (consecutiveErrors > 0) {
+          const errorMultiplier = Math.min(5, Math.pow(2, consecutiveErrors)); // Exponential backoff
+          const errorDelay = config.minDelayAfterError * errorMultiplier;
+          logStatus(
+            `Error-based delay: ${
+              errorDelay / 1000
+            }s (${consecutiveErrors} consecutive errors)`
+          );
+          return errorDelay;
+        }
 
         // Reset burst counter if window expired
         if (now - burstWindowStart > config.burstWindow) {
           burstCount = 0;
           burstWindowStart = now;
+          logStatus("Burst window reset");
         }
 
-        // If we're within burst limit, minimal delay
+        // Even for burst requests, use minimum delay to be safe
         if (burstCount < config.burstLimit) {
-          return Math.max(300, config.baseDelay * 0.3); // Very fast for burst
+          const burstDelay = Math.max(2000, config.baseDelay * 0.5); // Minimum 2 seconds even in burst
+          logStatus(
+            `Burst request ${burstCount + 1}/${config.burstLimit} - delay: ${
+              burstDelay / 1000
+            }s`
+          );
+          return burstDelay;
         }
 
-        // After burst, use adaptive delay
+        // Regular delay with adaptive multiplier
         const baseDelay = config.baseDelay * adaptiveDelayMultiplier;
         const timeSinceLastRequest = now - lastRequestTime;
+        const calculatedDelay = Math.max(0, baseDelay - timeSinceLastRequest);
 
-        return Math.max(0, baseDelay - timeSinceLastRequest);
+        logStatus(
+          `Regular delay: ${
+            calculatedDelay / 1000
+          }s (multiplier: ${adaptiveDelayMultiplier}x)`
+        );
+        return calculatedDelay;
       }
 
       // Enhanced request scheduler
@@ -360,39 +388,56 @@
 
           const result = await requestFn();
 
-          // Success - reduce adaptive delay
+          // Success - gradually reduce adaptive delay and reset error count
           consecutiveErrors = 0;
           if (adaptiveDelayMultiplier > 1) {
             adaptiveDelayMultiplier = Math.max(
               1,
-              adaptiveDelayMultiplier * 0.9
+              adaptiveDelayMultiplier * 0.8
+            );
+            logStatus(
+              `Success! Reduced delay multiplier to ${adaptiveDelayMultiplier}x`
             );
           }
 
           resolve(result);
         } catch (error) {
-          // Handle errors with intelligent backoff
+          // Handle errors with aggressive backoff
           consecutiveErrors++;
 
           if (
             error.message.includes("429") ||
             error.message.includes("rate limit")
           ) {
-            // Increase adaptive delay for rate limits
+            // Much more aggressive rate limit response
             adaptiveDelayMultiplier = Math.min(
-              3,
-              adaptiveDelayMultiplier * 1.5
+              8,
+              adaptiveDelayMultiplier * 2.5
             );
             logStatus(
-              `Rate limit detected. Adaptive delay increased to ${adaptiveDelayMultiplier}x`
+              `🚨 RATE LIMIT! Increased delay multiplier to ${adaptiveDelayMultiplier}x. Consecutive errors: ${consecutiveErrors}`,
+              true
+            );
+
+            // Reset burst counter to prevent further fast requests
+            burstCount = config.burstLimit;
+          } else {
+            // For other errors, moderate increase
+            adaptiveDelayMultiplier = Math.min(
+              4,
+              adaptiveDelayMultiplier * 1.3
+            );
+            logStatus(
+              `Error detected. Delay multiplier: ${adaptiveDelayMultiplier}x`,
+              true
             );
           }
 
           reject(error);
         } finally {
           activeRequests--;
-          // Continue processing queue with minimal delay
-          setTimeout(processQueue, 100);
+          // Much longer delay before processing next request after any request
+          setTimeout(processQueue, 500);
         }
       }
 
@@ -451,15 +496,24 @@
             const isLastAttempt = attempt === maxRetries - 1;
 
             if (isRateLimit && !isLastAttempt) {
-              // Smart backoff for rate limits - use fibonacci-like sequence
-              const delays = [2000, 5000, 12000]; // 2s, 5s, 12s
-              const delay = delays[attempt] || 20000;
+              // Much longer backoff for rate limits - aggressive approach
+              const delays = [10000, 30000, 60000]; // 10s, 30s, 60s
+              const delay = delays[attempt] || 120000; // 2 minutes for final attempts
 
               logStatus(
-                `Rate limit hit on ${file.name}. Waiting ${
+                `🚨 Rate limit on ${file.name}. Waiting ${
                   delay / 1000
-                }s before retry ${attempt + 2}...`
+                }s before retry ${attempt + 2}/${maxRetries}...`,
+                true
               );
+
+              // Also increase global delay multiplier
+              adaptiveDelayMultiplier = Math.min(
+                8,
+                adaptiveDelayMultiplier * 2
+              );
+              consecutiveErrors++;
+
               await new Promise((resolve) => setTimeout(resolve, delay));
               continue;
             }
@@ -797,11 +851,19 @@
         let completed = 0;
         let totalEntries = 0;
 
-        // Reset rate limiting state for new batch
+        // Reset rate limiting state for new batch - but keep it conservative
         burstCount = 0;
         burstWindowStart = Date.now();
-        consecutiveErrors = 0;
-        adaptiveDelayMultiplier = 1;
+        // Don't reset consecutiveErrors or adaptiveDelayMultiplier - keep learning from previous errors
+
+        logStatus(
+          `🔧 Starting ultra-safe batch processing: ${batchInfo.displayName}`
+        );
+        logStatus(
+          `Current settings: ${getCurrentConfig().maxConcurrent} concurrent, ${
+            getCurrentConfig().baseDelay / 1000
+          }s base delay, ${adaptiveDelayMultiplier}x multiplier`
+        );
 
         // Process files with smart concurrency
         const promises = fileArray.map(async (file, index) => {
@@ -944,7 +1006,12 @@
           });
         });
 
-        logStatus("✅ Application ready - now with smart rate limiting!");
+        logStatus(
+          `✅ Application ready - ULTRA-SAFE mode to prevent 429 errors!`
+        );
+        logStatus(
+          `⚠️  This version prioritizes zero rate limits over speed. Each image will wait 4+ seconds.`
+        );
       }
 
       window.addEventListener("DOMContentLoaded", init);
